@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 
 from .genesis_dia_server_audio import get_audio_duration_seconds, load_audio_bytes
+from .genesis_dia_server_auth import authorize_api_key, get_auth_store
 from .genesis_dia_server_engine import diarize_audio
 from .genesis_dia_server_globals import (
     current_settings,
@@ -82,6 +83,7 @@ def create_api(app: FastAPI) -> FastAPI:
         min_speakers: Optional[int] = Form(None, description="Minimum number of speakers."),
         max_speakers: Optional[int] = Form(None, description="Maximum number of speakers."),
     ):
+        api_key_id = authorize_api_key(request)
         request_start_time = time.monotonic()
         request_id = uuid.uuid4().hex[:10]
         source_ip = request.client.host if request.client else "unknown"
@@ -163,6 +165,9 @@ def create_api(app: FastAPI) -> FastAPI:
         with history_lock:
             diarization_history.appendleft(log_entry)
         log_diarization(log_entry)
+
+        if api_key_id:
+            get_auth_store().record_api_key_usage(api_key_id, audio_seconds)
 
         if await request.is_disconnected():
             print("[API-DIA-WARNUNG] Client hat die Verbindung getrennt.", file=sys.stderr)

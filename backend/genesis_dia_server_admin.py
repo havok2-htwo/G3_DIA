@@ -8,11 +8,18 @@ from statistics import mean
 from typing import Any, Dict, List
 
 import torch
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
 
 from .genesis_dia_server_audio import get_audio_duration_seconds, load_audio_bytes
-from .genesis_dia_server_auth import get_admin_key_store, require_admin
+from .genesis_dia_server_auth import (
+    SESSION_COOKIE_NAME,
+    clear_session_cookie,
+    get_auth_store,
+    require_admin,
+    require_session,
+    set_session_cookie,
+)
 from .genesis_dia_server_engine import load_diarization_model, diarize_audio
 from .genesis_dia_server_globals import (
     current_settings,
@@ -32,6 +39,20 @@ class AdminSettingsPayload(BaseModel):
     diarization_model_id: str
     model_cache_path: str
     huggingface_token: str
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+class ChangePasswordPayload(BaseModel):
+    current_password: str
+    new_password: str
+
+
+class CreateApiKeyPayload(BaseModel):
+    alias: str = ""
 
 
 def _serialize_settings() -> Dict[str, Any]:
@@ -155,16 +176,57 @@ async def _run_admin_benchmark(request: Request, audio_data, repeat_count: int) 
 
 
 def create_admin_api(app: FastAPI) -> FastAPI:
-    @app.get("/api/admin/keys")
-    async def admin_get_keys(_: dict[str, str] = Depends(require_admin)):
-        return get_admin_key_store().list_keys()
+    # --- Auth: username/password login backed by an httpOnly session cookie ---
+    @app.post("/api/admin/auth/login")
+    async def admin_login(payload: LoginPayload, request: Request, response: Response):
+        store = get_auth_store()
+        user = store.verify_user(payload.username, payload.password)
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid username or password.")
+        token = store.create_session(user["username"])
+        store.touch_login(user["username"])
+        set_session_cookie(response, request, token)
+        return {"username": user["username"], "must_change_password": bool(user.get("must_change_password"))}
 
-    @app.post("/api/admin/keys")
-    async def admin_rotate_key(_: dict[str, str] = Depends(require_admin)):
-        return {
-            "key": get_admin_key_store().rotate_admin_key(),
-            "keys": get_admin_key_store().list_keys(),
-        }
+    @app.post("/api/admin/auth/logout")
+    async def admin_logout(request: Request, response: Response, _: dict = Depends(require_session)):
+        get_auth_store().delete_session(request.cookies.get(SESSION_COOKIE_NAME))
+        clear_session_cookie(response)
+        return {"ok": True}
+
+    @app.get("/api/admin/auth/whoami")
+    async def admin_whoami(ctx: dict = Depends(require_session)):
+        return {"username": ctx["username"], "must_change_password": ctx["must_change_password"]}
+
+    @app.post("/api/admin/auth/change-password")
+    async def admin_change_password(
+        payload: ChangePasswordPayload,
+        request: Request,
+        response: Response,
+        ctx: dict = Depends(require_session),
+    ):
+        store = get_auth_store()
+        if not store.verify_user(ctx["username"], payload.current_password):
+            raise HTTPException(status_code=400, detail="Current password is incorrect.")
+        store.set_password(ctx["username"], payload.new_password)
+        token = store.create_session(ctx["username"])
+        set_session_cookie(response, request, token)
+        return {"ok": True, "must_change_password": False}
+
+    # --- Client API keys (admin-managed; used to authorize the public /diarize/ API) ---
+    @app.get("/api/admin/api-keys")
+    async def admin_list_api_keys(_: dict = Depends(require_admin)):
+        return {"keys": get_auth_store().list_api_keys()}
+
+    @app.post("/api/admin/api-keys")
+    async def admin_create_api_key(payload: CreateApiKeyPayload, _: dict = Depends(require_admin)):
+        return get_auth_store().create_api_key(payload.alias)
+
+    @app.delete("/api/admin/api-keys/{key_id}")
+    async def admin_delete_api_key(key_id: str, _: dict = Depends(require_admin)):
+        if not get_auth_store().delete_api_key(key_id):
+            raise HTTPException(status_code=404, detail="API key not found.")
+        return {"ok": True}
 
     @app.get("/api/admin/settings")
     async def admin_get_settings(_: dict[str, str] = Depends(require_admin)):

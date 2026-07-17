@@ -1,0 +1,40 @@
+# --- VCS / IDE ---
+.git
+.gitignore
+.vscode
+.idea
+
+# --- Python local env / caches ---
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# --- Frontend deps & prebuilt output (rebuilt inside the image) ---
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/.node_modules_installed
+
+# --- Large binaries: models are volume-mounted, never baked in ---
+models/
+
+# --- Runtime state (mounted as a volume) ---
+logs/
+.tmp/
+
+# --- Windows launchers / local setup not used in the container ---
+start.bat
+install.bat
+
+# --- Deployment files (kept out of the build context) ---
+docker-compose.yml
+.env
+.env.*
+
+# --- Docs / misc ---
+*.md
+!README.md
+.DS_Store
+Thumbs.db
