@@ -16,9 +16,8 @@ The project exposes:
 
 - speaker diarization via `pyannote/speaker-diarization-community-1`
 - local FastAPI backend with React/Vite frontend
-- `X-Admin-Key` protection for all admin routes
-- persistent hashed admin key plus temporary startup admin key
-- admin key rotation from the browser
+- username/password login for the admin dashboard
+- admin-managed client API keys for public endpoints
 - persisted Hugging Face token and cache-path settings
 - live task progress and worker status for the active diarization job
 - request history with speaker/segment summaries
@@ -34,13 +33,13 @@ Active backend files live in [`backend`](x:/dev/G3_DIA/backend):
 - `backend/genesis_dia_server_api.py`
   - public diarization endpoint on `POST /diarize/`
 - `backend/genesis_dia_server_admin.py`
-  - protected admin endpoints for keys, settings, stats, task state, benchmark
+  - protected admin endpoints for auth, client API keys, settings, stats, task state, benchmark
 - `backend/genesis_dia_server_engine.py`
   - pyannote model loading and diarization runtime
 - `backend/genesis_dia_server_audio.py`
   - audio/video decode, resampling, mono normalization
 - `backend/genesis_dia_server_auth.py`
-  - persistent admin key storage, startup key support, header verification
+  - admin user storage, session cookies, client API key verification
 - `backend/genesis_dia_server_storage.py`
   - settings persistence and JSONL logging
 - `backend/genesis_dia_server_globals.py`
@@ -66,14 +65,19 @@ Response fields:
 - `speakers_found`
 - `segments_found`
 
-The API is intentionally public. Admin credentials are only required for `/api/admin/...`.
+The API is open until at least one client API key exists. Once keys exist, callers must send `X-API-Key`. Admin credentials are only required for `/admin` and `/api/admin/...`.
 
 ## Admin Dashboard
 
 Protected routes:
 
-- `GET /api/admin/keys`
-- `POST /api/admin/keys`
+- `POST /api/admin/auth/login`
+- `POST /api/admin/auth/logout`
+- `GET /api/admin/auth/whoami`
+- `POST /api/admin/auth/change-password`
+- `GET /api/admin/api-keys`
+- `POST /api/admin/api-keys`
+- `DELETE /api/admin/api-keys/{key_id}`
 - `GET /api/admin/settings`
 - `PUT /api/admin/settings`
 - `GET /api/admin/stats`
@@ -82,7 +86,7 @@ Protected routes:
 
 The dashboard offers:
 
-- admin key metadata and rotation
+- password-based admin login and client API key management
 - current task progress from the pyannote progress hook
 - worker status such as pending requests and last error
 - runtime settings for cache path and Hugging Face token
@@ -108,10 +112,6 @@ Recognized environment variables:
 - `HUGGINGFACE_TOKEN`
 - `HF_TOKEN`
 - `HUGGING_FACE_HUB_TOKEN`
-- `GENESIS_ADMIN_KEY`
-- `GENESIS_STARTUP_ADMIN_KEY`
-- `GENESIS_STARTUP_ADMIN_KEY_TTL_SECONDS`
-- `GENESIS_STARTUP_ADMIN_KEY_DISPLAY_SECONDS`
 
 ## Logs and Persistent Data
 
@@ -143,7 +143,6 @@ The launch/install flow handles:
 - PyTorch installation
 - dependency installation from `requirements.txt`
 - frontend dependency installation and build
-- startup admin key generation
 - server launch via `python -m backend.genesis_dia_server`
 
 ## Notes

@@ -2,6 +2,12 @@
 
 ## Public Route
 
+The public diarization route is open until at least one client API key is configured. Once keys exist, callers must provide:
+
+```http
+X-API-Key: g3_dia_...
+```
+
 ### `POST /diarize/`
 
 Multipart form-data:
@@ -31,15 +37,55 @@ Example response:
 
 ## Protected Admin Routes
 
-All routes below require the `X-Admin-Key` request header.
+Admin routes use username/password login and an httpOnly session cookie. The default first-run login is `admin` / `admin`, and the password must be changed before protected admin actions are available.
 
-### `GET /api/admin/keys`
+### `POST /api/admin/auth/login`
 
-Returns metadata for the persistent admin key.
+Creates a browser session.
 
-### `POST /api/admin/keys`
+```json
+{
+  "username": "admin",
+  "password": "admin"
+}
+```
 
-Rotates the persistent admin key and returns the new plaintext token exactly once.
+### `POST /api/admin/auth/change-password`
+
+Changes the current admin password and refreshes the session.
+
+```json
+{
+  "current_password": "admin",
+  "new_password": "new-password"
+}
+```
+
+### `GET /api/admin/auth/whoami`
+
+Returns the current session user and password-change state.
+
+### `POST /api/admin/auth/logout`
+
+Clears the current browser session.
+
+### `GET /api/admin/api-keys`
+
+Returns metadata for configured client API keys.
+
+### `POST /api/admin/api-keys`
+
+Creates a client API key and returns the plaintext token once.
+
+```json
+{
+  "alias": "local-client"
+}
+```
+
+### `DELETE /api/admin/api-keys/{key_id}`
+
+Deletes a client API key.
 
 ### `GET /api/admin/settings`
 
