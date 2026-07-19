@@ -20,6 +20,7 @@ models/
 
 # Logs & runtime data
 logs/
+.tmp/
 
 # Test audio files (large binaries)
 testaudio/
