@@ -11,7 +11,7 @@ import torch
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
 
-from .genesis_dia_server_audio import get_audio_duration_seconds, load_audio_bytes
+from .genesis_dia_server_audio import get_audio_duration_seconds, load_audio_file
 from .genesis_dia_server_auth import (
     SESSION_COOKIE_NAME,
     clear_session_cookie,
@@ -21,6 +21,7 @@ from .genesis_dia_server_auth import (
     set_session_cookie,
 )
 from .genesis_dia_server_engine import load_diarization_model, diarize_audio
+from .genesis_dia_server_gpu_lease import run_blocking_gpu_phase
 from .genesis_dia_server_globals import (
     current_settings,
     current_task_status,
@@ -89,12 +90,6 @@ def _normalize_result_for_compare(result: Dict[str, list]) -> str:
 
 
 async def _run_admin_benchmark(request: Request, audio_data, repeat_count: int) -> Dict[str, Any]:
-    if not await asyncio.to_thread(load_diarization_model):
-        raise HTTPException(status_code=500, detail="Diarisierungs-Modell konnte fuer den Benchmark nicht geladen werden.")
-
-    cuda_index = int(torch.cuda.current_device()) if torch.cuda.is_available() else None
-    _reset_peak_vram_tracking(cuda_index)
-
     audio_seconds = round(get_audio_duration_seconds(audio_data), 3)
     total_audio_seconds = round(audio_seconds * repeat_count, 3)
     run_durations: List[int] = []
@@ -103,20 +98,37 @@ async def _run_admin_benchmark(request: Request, audio_data, repeat_count: int) 
     benchmark_request_id = f"benchmark-{uuid.uuid4().hex[:10]}"
     batch_started_at = time.perf_counter()
 
-    with task_status_lock:
-        current_task_status["task_name"] = "Benchmark"
-        current_task_status["progress"] = 0.0
-        current_task_status["details"] = "Preparing repeated diarization runs."
-
     async with local_gpu_lock:
-        with task_runtime_lock:
-            task_runtime_state["worker_running"] = True
-            task_runtime_state["active_request_id"] = benchmark_request_id
-            task_runtime_state["active_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-            task_runtime_state["active_audio_seconds"] = audio_seconds
-            task_runtime_state["last_error"] = None
+        # Do not overwrite the currently active API task while this benchmark
+        # is merely queued for the local GPU lock.
+        with task_status_lock:
+            current_task_status["task_name"] = "Benchmark"
+            current_task_status["progress"] = 0.0
+            current_task_status["details"] = "Preparing repeated diarization runs."
 
+        cuda_index: int | None = None
+        peak_metrics: Dict[str, float | None] = {
+            "peak_vram_reserved_mb": None,
+            "peak_vram_allocated_mb": None,
+        }
+        with task_runtime_lock:
+            task_runtime_state["last_error"] = None
         try:
+            if not await run_blocking_gpu_phase(load_diarization_model):
+                raise HTTPException(
+                    status_code=500,
+                    detail="Diarisierungs-Modell konnte fuer den Benchmark nicht geladen werden.",
+                )
+
+            cuda_index = int(torch.cuda.current_device()) if torch.cuda.is_available() else None
+            await run_blocking_gpu_phase(_reset_peak_vram_tracking, cuda_index)
+            with task_runtime_lock:
+                task_runtime_state["worker_running"] = True
+                task_runtime_state["active_request_id"] = benchmark_request_id
+                task_runtime_state["active_started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                task_runtime_state["active_audio_seconds"] = audio_seconds
+                task_runtime_state["last_error"] = None
+
             for repeat_index in range(repeat_count):
                 with task_status_lock:
                     current_task_status["task_name"] = "Benchmark"
@@ -124,15 +136,23 @@ async def _run_admin_benchmark(request: Request, audio_data, repeat_count: int) 
                     current_task_status["details"] = f"Run {repeat_index + 1} / {repeat_count}"
 
                 run_started_at = time.perf_counter()
-                result = await asyncio.to_thread(diarize_audio, audio_data)
+                result = await run_blocking_gpu_phase(diarize_audio, audio_data)
                 run_durations.append(round((time.perf_counter() - run_started_at) * 1000))
                 results.append(result)
+            # Synchronizing and reading CUDA counters is GPU work as well. Keep
+            # it inside the same local lock so a queued API request cannot race
+            # the benchmark's final accounting.
+            peak_metrics = await run_blocking_gpu_phase(_read_peak_vram_metrics, cuda_index)
+        except asyncio.CancelledError:
+            with task_runtime_lock:
+                task_runtime_state["last_error"] = "Benchmark request was cancelled."
+            raise
+        except HTTPException as exc:
+            with task_runtime_lock:
+                task_runtime_state["last_error"] = str(exc.detail)
+            raise
         except Exception as exc:
             with task_runtime_lock:
-                task_runtime_state["worker_running"] = False
-                task_runtime_state["active_request_id"] = None
-                task_runtime_state["active_started_at"] = None
-                task_runtime_state["active_audio_seconds"] = 0.0
                 task_runtime_state["last_error"] = str(exc)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         finally:
@@ -151,7 +171,6 @@ async def _run_admin_benchmark(request: Request, audio_data, repeat_count: int) 
     first_result = results[0] if results else {}
     speakers_found = len(first_result.keys())
     segments_found = sum(len(segments) for segments in first_result.values())
-    peak_metrics = _read_peak_vram_metrics(cuda_index)
     normalized_results = {_normalize_result_for_compare(result) for result in results}
     with settings_lock:
         model_id = current_settings.get("diarization_model_id", "")
@@ -237,7 +256,11 @@ def create_admin_api(app: FastAPI) -> FastAPI:
         }
 
     @app.put("/api/admin/settings")
-    async def admin_update_settings(payload: AdminSettingsPayload, _: dict[str, str] = Depends(require_admin)):
+    async def admin_update_settings(
+        payload: AdminSettingsPayload,
+        request: Request,
+        _: dict[str, str] = Depends(require_admin),
+    ):
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         normalized = normalize_settings(payload_data)
         with settings_lock:
@@ -253,7 +276,8 @@ def create_admin_api(app: FastAPI) -> FastAPI:
         )
         model_loaded = None
         if model_settings_changed:
-            model_loaded = await asyncio.to_thread(load_diarization_model)
+            async with request.app.state.local_gpu_lock:
+                model_loaded = await run_blocking_gpu_phase(load_diarization_model)
 
         model_identifier = diarization_pipeline.get("model_identifier")
         return {
@@ -309,8 +333,7 @@ def create_admin_api(app: FastAPI) -> FastAPI:
 
         filename = file.filename or "benchmark-audio"
         try:
-            audio_bytes = await file.read()
-            audio_data = load_audio_bytes(audio_bytes, filename)
+            audio_data = await asyncio.to_thread(load_audio_file, file.file, filename)
         except HTTPException:
             raise
         except Exception as exc:

@@ -168,6 +168,10 @@ def _landing_response() -> HTMLResponse:
                   existiert, wird ein <code>X-API-Key</code>-Header verlangt.
                 </p>
                 <p>
+                  Fuer neue Integrationen stehen <code>POST /v2/diarize</code> mit Exclusive-Diarization
+                  und Overlap-Regionen sowie <code>GET /v2/capabilities</code> zur Verfuegung.
+                </p>
+                <p>
                   Das Admin-Dashboard unter <code>/admin</code> ist per Login (Benutzername/Passwort) geschuetzt.
                   Standardzugang <code>admin</code> / <code>admin</code> &ndash; das Passwort muss beim ersten
                   Login geaendert werden.
@@ -198,7 +202,7 @@ async def serve_frontend_index():
 
 @app.get("/{full_path:path}")
 async def serve_frontend_assets(full_path: str):
-    if full_path.startswith("api/"):
+    if full_path.startswith(("api/", "v2/")):
         return HTMLResponse(status_code=404, content="Not Found")
 
     if full_path.startswith("admin/"):
@@ -215,4 +219,5 @@ if __name__ == "__main__":
     print("Oeffne die Startseite in deinem Browser: http://127.0.0.1:7864/", file=sys.stderr)
     print("Das Admin-Dashboard ist erreichbar unter: http://127.0.0.1:7864/admin", file=sys.stderr)
     print("Der API-Endpunkt ist erreichbar unter: POST http://127.0.0.1:7864/diarize/", file=sys.stderr)
+    print("Die v2-API ist erreichbar unter: POST http://127.0.0.1:7864/v2/diarize", file=sys.stderr)
     uvicorn.run(app, host="0.0.0.0", port=7864)

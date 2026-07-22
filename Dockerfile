@@ -62,12 +62,12 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Non-root; pre-own the volume mountpoints so named volumes inherit ownership.
 RUN useradd --create-home --uid 1000 app \
-    && mkdir -p /app/models /app/logs /app/frontend \
+    && mkdir -p /app/models /app/logs /app/frontend /app/gpu-coordination \
     && chown -R app:app /app
 USER app
 
 EXPOSE 7864
-VOLUME ["/app/models", "/app/logs"]
+VOLUME ["/app/models", "/app/logs", "/app/gpu-coordination"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=1200s --retries=5 \
     CMD curl -fsS http://localhost:7864/openapi.json >/dev/null || exit 1

@@ -8,6 +8,8 @@ It combines the diarization core from the older `genesis2_dia_server_project` wi
 The project exposes:
 
 - a public diarization API on `POST /diarize/`
+- a structured diarization API on `POST /v2/diarize`
+- capability discovery on `GET /v2/capabilities`
 - a protected admin dashboard on `GET /admin`
 - OpenAPI docs on `GET /docs`
 - a landing page on `GET /`
@@ -23,6 +25,8 @@ The project exposes:
 - request history with speaker/segment summaries
 - benchmark workflow for repeated diarization runs
 - audio loading with `soundfile` and `ffmpeg` fallback
+- seek-safe MP4/M4A/MOV decoding without a second full upload byte copy
+- optional cross-process GPU serialization shared with G3_WHISPER
 
 ## Architecture
 
@@ -66,6 +70,20 @@ Response fields:
 - `segments_found`
 
 The API is open until at least one client API key exists. Once keys exist, callers must send `X-API-Key`. Admin credentials are only required for `/admin` and `/api/admin/...`.
+
+### `POST /v2/diarize`
+
+Uses the same multipart fields and authentication policy as the legacy route,
+but returns chronological millisecond arrays for standard diarization,
+exclusive diarization and overlap regions. Native pyannote embeddings are not
+exposed. See [`API_DOCUMENTATION.md`](API_DOCUMENTATION.md) for the complete
+contract and cURL example.
+
+### `GET /v2/capabilities`
+
+Returns v2 feature flags plus the configured model ID, its current load status
+and the selected device. It is protected by the same conditional `X-API-Key`
+policy as both diarization routes.
 
 ## Admin Dashboard
 
@@ -112,6 +130,7 @@ Recognized environment variables:
 - `HUGGINGFACE_TOKEN`
 - `HF_TOKEN`
 - `HUGGING_FACE_HUB_TOKEN`
+- `GENESIS_GPU_LEASE_PATH` (optional shared file-lock path for CUDA serialization)
 
 ## Logs and Persistent Data
 
@@ -149,4 +168,5 @@ The launch/install flow handles:
 
 - `omegaconf` is intentionally part of `requirements.txt` because pyannote can fail at runtime without it even when `pyannote.audio` is already installed.
 - `ffmpeg` is optional but strongly recommended for broader media-format support.
+- ffmpeg fallback uses a bounded-chunk named temporary file so tail-metadata M4A/MP4/MOV uploads remain seekable.
 - The current G3-DIA runtime is intentionally built around a single diarization model, so there is no model picker in the admin UI.

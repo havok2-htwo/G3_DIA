@@ -18,6 +18,7 @@ from .genesis_dia_server_globals import (
     settings_lock,
     task_status_lock,
 )
+from .genesis_dia_server_gpu_lease import acquire_gpu_lease
 
 HUGGING_FACE_TOKEN = None
 
@@ -83,6 +84,13 @@ def _from_pretrained_any(model_id: str, token: Optional[str], cache_dir: Optiona
 
 
 def load_diarization_model() -> bool:
+    """Load the pipeline, taking the optional cross-process CUDA lease."""
+
+    with acquire_gpu_lease():
+        return _load_diarization_model_unleased()
+
+
+def _load_diarization_model_unleased() -> bool:
     global HUGGING_FACE_TOKEN
 
     with settings_lock:
@@ -143,34 +151,130 @@ def load_diarization_model() -> bool:
             return False
 
 
+def _annotation_tracks(annotation: Any) -> list[tuple[float, float, str]]:
+    tracks: list[tuple[float, float, str]] = []
+    if annotation is None:
+        return tracks
+
+    if hasattr(annotation, "itertracks"):
+        iterator = annotation.itertracks(yield_label=True)
+        for turn, _, speaker in iterator:
+            tracks.append((float(turn.start), float(turn.end), str(speaker)))
+    else:
+        for turn, speaker in annotation:
+            tracks.append((float(turn.start), float(turn.end), str(speaker)))
+
+    tracks.sort(key=lambda item: (item[0], item[1], item[2]))
+    return tracks
+
+
+def _standard_annotation(result_obj: Any) -> Any:
+    return getattr(result_obj, "speaker_diarization", result_obj)
+
+
 def _format_result(result_obj: Any) -> Dict[str, list]:
+    """Keep the historical /diarize/ speaker mapping byte-for-byte compatible."""
+
     speaker_turns: Dict[str, list] = {}
-
-    if hasattr(result_obj, "speaker_diarization"):
-        iterator = result_obj.speaker_diarization
-        for turn, speaker in iterator:
-            speaker_turns.setdefault(str(speaker), []).append(
-                {"start": round(float(turn.start), 3), "end": round(float(turn.end), 3)}
-            )
-        return speaker_turns
-
-    if hasattr(result_obj, "itertracks"):
-        for turn, _, speaker in result_obj.itertracks(yield_label=True):
-            speaker_turns.setdefault(str(speaker), []).append(
-                {"start": round(float(turn.start), 3), "end": round(float(turn.end), 3)}
-            )
-        return speaker_turns
-
+    for start, end, speaker in _annotation_tracks(_standard_annotation(result_obj)):
+        speaker_turns.setdefault(speaker, []).append({"start": round(start, 3), "end": round(end, 3)})
     return speaker_turns
 
 
-def diarize_audio(
+def _format_segments_ms(annotation: Any) -> list[Dict[str, Any]]:
+    segments: list[Dict[str, Any]] = []
+    for start, end, speaker in _annotation_tracks(annotation):
+        start_ms = round(start * 1000.0)
+        end_ms = round(end * 1000.0)
+        if end_ms <= start_ms:
+            continue
+        segments.append({"start_ms": start_ms, "end_ms": end_ms, "speaker_id": speaker})
+    return segments
+
+
+def _format_overlap_regions(annotation: Any) -> list[Dict[str, Any]]:
+    """Return maximal standard-diarization regions with two or more speakers."""
+
+    events: Dict[float, list[tuple[str, int]]] = {}
+    for start, end, speaker in _annotation_tracks(annotation):
+        if end <= start:
+            continue
+        events.setdefault(start, []).append((speaker, 1))
+        events.setdefault(end, []).append((speaker, -1))
+
+    active_counts: Dict[str, int] = {}
+    overlap_regions: list[Dict[str, Any]] = []
+    previous_time: float | None = None
+
+    for event_time in sorted(events):
+        active_speakers = sorted(speaker for speaker, count in active_counts.items() if count > 0)
+        if previous_time is not None and event_time > previous_time and len(active_speakers) >= 2:
+            start_ms = round(previous_time * 1000.0)
+            end_ms = round(event_time * 1000.0)
+            if end_ms > start_ms:
+                current = {
+                    "start_ms": start_ms,
+                    "end_ms": end_ms,
+                    "speaker_ids": active_speakers,
+                }
+                if (
+                    overlap_regions
+                    and overlap_regions[-1]["end_ms"] == start_ms
+                    and overlap_regions[-1]["speaker_ids"] == active_speakers
+                ):
+                    overlap_regions[-1]["end_ms"] = end_ms
+                else:
+                    overlap_regions.append(current)
+
+        for speaker, delta in events[event_time]:
+            next_count = active_counts.get(speaker, 0) + delta
+            if next_count > 0:
+                active_counts[speaker] = next_count
+            else:
+                active_counts.pop(speaker, None)
+        previous_time = event_time
+
+    return overlap_regions
+
+
+def format_diarization_v2(result_obj: Any) -> Dict[str, list]:
+    """Format pyannote 4 output without exposing its native speaker centroids."""
+
+    standard_annotation = _standard_annotation(result_obj)
+    exclusive_annotation = getattr(result_obj, "exclusive_speaker_diarization", None)
+    if exclusive_annotation is None:
+        raise RuntimeError(
+            "Das konfigurierte Diarisierungs-Modell liefert keine Exclusive-Diarization. "
+            "Fuer /v2/diarize ist pyannote/speaker-diarization-community-1 erforderlich."
+        )
+
+    return {
+        "diarization": _format_segments_ms(standard_annotation),
+        "exclusive_diarization": _format_segments_ms(exclusive_annotation),
+        "overlaps": _format_overlap_regions(standard_annotation),
+    }
+
+
+def _run_diarization_pipeline(
     audio_data_np: np.ndarray,
     num_speakers: Optional[int] = None,
     min_speakers: Optional[int] = None,
     max_speakers: Optional[int] = None,
-) -> Dict[str, list]:
-    if not load_diarization_model():
+) -> Any:
+    # One lease spans model loading and inference.  Calling the unleased model
+    # loader here avoids nested locks while the public load helper still
+    # protects admin-triggered standalone model loads.
+    with acquire_gpu_lease():
+        return _run_diarization_pipeline_unleased(audio_data_np, num_speakers, min_speakers, max_speakers)
+
+
+def _run_diarization_pipeline_unleased(
+    audio_data_np: np.ndarray,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+) -> Any:
+    if not _load_diarization_model_unleased():
         raise RuntimeError(
             "Das Diarisierungs-Modell konnte nicht geladen werden. Pruefen Sie die Server-Logs und den Hugging Face Token."
         )
@@ -179,42 +283,64 @@ def diarize_audio(
     if pipeline is None:
         raise RuntimeError("Diarisierungs-Pipeline nicht initialisiert.")
 
+    from pyannote.audio.pipelines.utils.hook import ProgressHook
+
+    class LiveStatusProgressHook(ProgressHook):
+        def __call__(
+            self,
+            step_name: str,
+            step_artifact: Any,
+            file: Optional[Dict] = None,
+            total: Optional[int] = None,
+            completed: Optional[int] = None,
+        ):
+            super().__call__(step_name, step_artifact, file=file, total=total, completed=completed)
+            with task_status_lock:
+                safe_total = total if total is not None else 1
+                safe_comp = completed if completed is not None else 1
+                progress_percent = (safe_comp / safe_total * 100) if safe_total > 0 else 0
+                current_task_status["task_name"] = "Diarization"
+                current_task_status["progress"] = round(progress_percent, 2)
+                current_task_status["details"] = f"Step: {step_name} ({safe_comp}/{safe_total})"
+
+    waveform = torch.from_numpy(audio_data_np).unsqueeze(0)
+    audio_dict = {"waveform": waveform, "sample_rate": 16000}
+
+    pipeline_kwargs: Dict[str, int] = {}
+    if num_speakers is not None:
+        pipeline_kwargs["num_speakers"] = num_speakers
+    if min_speakers is not None:
+        pipeline_kwargs["min_speakers"] = min_speakers
+    if max_speakers is not None:
+        pipeline_kwargs["max_speakers"] = max_speakers
+
+    with LiveStatusProgressHook() as hook:
+        return pipeline(audio_dict, hook=hook, **pipeline_kwargs)
+
+
+def diarize_audio(
+    audio_data_np: np.ndarray,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+) -> Dict[str, list]:
     try:
-        from pyannote.audio.pipelines.utils.hook import ProgressHook
-
-        class LiveStatusProgressHook(ProgressHook):
-            def __call__(
-                self,
-                step_name: str,
-                step_artifact: Any,
-                file: Optional[Dict] = None,
-                total: Optional[int] = None,
-                completed: Optional[int] = None,
-            ):
-                super().__call__(step_name, step_artifact, file=file, total=total, completed=completed)
-                with task_status_lock:
-                    safe_total = total if total is not None else 1
-                    safe_comp = completed if completed is not None else 1
-                    progress_percent = (safe_comp / safe_total * 100) if safe_total > 0 else 0
-                    current_task_status["task_name"] = "Diarization"
-                    current_task_status["progress"] = round(progress_percent, 2)
-                    current_task_status["details"] = f"Step: {step_name} ({safe_comp}/{safe_total})"
-
-        waveform = torch.from_numpy(audio_data_np).unsqueeze(0)
-        audio_dict = {"waveform": waveform, "sample_rate": 16000}
-
-        pipeline_kwargs: Dict[str, int] = {}
-        if num_speakers is not None:
-            pipeline_kwargs["num_speakers"] = num_speakers
-        if min_speakers is not None:
-            pipeline_kwargs["min_speakers"] = min_speakers
-        if max_speakers is not None:
-            pipeline_kwargs["max_speakers"] = max_speakers
-
-        with LiveStatusProgressHook() as hook:
-            diarization_result = pipeline(audio_dict, hook=hook, **pipeline_kwargs)
-
+        diarization_result = _run_diarization_pipeline(audio_data_np, num_speakers, min_speakers, max_speakers)
         return _format_result(diarization_result)
     except Exception as exc:
         print(f"[FEHLER-DIA] Bei der Diarisierung ist ein Fehler aufgetreten: {exc}", file=sys.stderr)
+        raise RuntimeError(f"Fehler bei der Diarisierung: {exc}") from exc
+
+
+def diarize_audio_v2(
+    audio_data_np: np.ndarray,
+    num_speakers: Optional[int] = None,
+    min_speakers: Optional[int] = None,
+    max_speakers: Optional[int] = None,
+) -> Dict[str, list]:
+    try:
+        diarization_result = _run_diarization_pipeline(audio_data_np, num_speakers, min_speakers, max_speakers)
+        return format_diarization_v2(diarization_result)
+    except Exception as exc:
+        print(f"[FEHLER-DIA] Bei der v2-Diarisierung ist ein Fehler aufgetreten: {exc}", file=sys.stderr)
         raise RuntimeError(f"Fehler bei der Diarisierung: {exc}") from exc
