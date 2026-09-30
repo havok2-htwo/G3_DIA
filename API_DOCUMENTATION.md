@@ -108,10 +108,13 @@ flags for exclusive diarization and overlap regions. It uses the same
   "model": {
     "id": "pyannote/speaker-diarization-community-1",
     "status": "loaded",
-    "device": "cuda"
+    "device": "cuda:0"
   }
 }
 ```
+
+`model.device` is the device the pipeline is loaded on (`cpu`, `cuda:0`, ...). Before
+the first load it falls back to `cuda` or `cpu`.
 
 ### cURL
 
@@ -176,7 +179,23 @@ Deletes a client API key.
 
 ### `GET /api/admin/settings`
 
-Returns the persisted DIA settings and the currently loaded model identifier.
+Returns the persisted DIA settings, the device options for the admin dropdown
+(`options.devices`: `auto`, `cpu` and one `cuda:N` entry per visible GPU), the
+currently loaded model identifier (`[model_id, cache_path, device]`) and
+`model_status`:
+
+```json
+{
+  "state": "error",
+  "error": "Hugging Face hat den Zugriff auf 'pyannote/speaker-diarization-community-1' abgelehnt. ...",
+  "device": "cuda:0",
+  "token_source": "settings",
+  "updated_at": "2026-10-01T10:15:02"
+}
+```
+
+`state` is `not_loaded`, `loading`, `loaded` or `error`; `token_source` is
+`settings`, `env` or `null` (no token found).
 
 ### `PUT /api/admin/settings`
 
@@ -186,9 +205,21 @@ Expected JSON body:
 {
   "diarization_model_id": "pyannote/speaker-diarization-community-1",
   "model_cache_path": ".\\models",
-  "huggingface_token": ""
+  "huggingface_token": "",
+  "gpu_device": "auto"
 }
 ```
+
+`gpu_device` accepts `auto` (current CUDA device, else CPU), `cpu` or `cuda:N`; if it
+is omitted the saved device is kept. Changing the model, cache path, token or device
+reloads the pipeline immediately; the response then carries `model_loaded` and
+`model_status` with the load error, if any.
+
+### `POST /api/admin/model/load`
+
+Loads the pipeline with the saved settings (no-op when it is already loaded) and
+returns `ok`, `model_loaded`, `loaded_model_identifier` and `model_status`. Useful
+to check a freshly entered token or device choice without running a benchmark.
 
 ### `GET /api/admin/stats`
 
@@ -217,6 +248,7 @@ Fields include:
 - `last_error`
 - `total_requests_processed`
 - `current_task`
+- `model_status` (same shape as in `GET /api/admin/settings`)
 
 ### `POST /api/admin/benchmark`
 

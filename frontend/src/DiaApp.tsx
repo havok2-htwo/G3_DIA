@@ -1,10 +1,12 @@
 import { FormEvent, startTransition, useEffect, useState } from "react";
 
 import {
+  AdminOption,
   AdminSettings,
   ApiKeyInfo,
   BenchmarkResponse,
   CreatedApiKey,
+  ModelStatus,
   SettingsResponse,
   StatsResponse,
   TaskResponse,
@@ -15,6 +17,7 @@ import {
   getStats,
   getTask,
   listApiKeys,
+  loadModel,
   login,
   logout,
   runBenchmark,
@@ -40,7 +43,19 @@ type AuthState = "loading" | "login" | "change" | "ready";
 
 const NUMBER_LOCALE = "de-DE";
 const POLL_MS = 1000;
-const emptySettings: AdminSettings = { diarization_model_id: "", model_cache_path: "", huggingface_token: "" };
+const emptySettings: AdminSettings = { diarization_model_id: "", model_cache_path: "", huggingface_token: "", gpu_device: "auto" };
+
+const MODEL_STATE_LABELS: Record<ModelStatus["state"], string> = {
+  not_loaded: "Not loaded yet",
+  loading: "Loading...",
+  loaded: "Loaded",
+  error: "Load failed",
+};
+
+const TOKEN_SOURCE_LABELS: Record<string, string> = {
+  settings: "Saved in settings",
+  env: "From .env / environment",
+};
 
 const formatValue = (value: number | null | undefined, suffix = "") => (
   value === null || value === undefined || Number.isNaN(value)
@@ -112,6 +127,9 @@ export default function DiaApp() {
   const [apiKeyBusy, setApiKeyBusy] = useState(false);
 
   const [settingsForm, setSettingsForm] = useState<AdminSettings>(emptySettings);
+  const [deviceOptions, setDeviceOptions] = useState<AdminOption[]>([]);
+  const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null);
+  const [modelLoadBusy, setModelLoadBusy] = useState(false);
   const [loadedModelIdentifier, setLoadedModelIdentifier] = useState<string[] | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [task, setTask] = useState<TaskResponse | null>(null);
@@ -126,8 +144,14 @@ export default function DiaApp() {
 
   const isReady = authState === "ready";
 
-  const applySettings = (payload: SettingsResponse) => {
-    setSettingsForm(payload.settings);
+  // The dashboard polls every second; only overwrite the form on the initial load and
+  // after a save, otherwise a pasted token or a device choice is reverted before saving.
+  const applySettings = (payload: SettingsResponse, updateForm: boolean) => {
+    if (updateForm) {
+      setSettingsForm({ ...emptySettings, ...payload.settings });
+    }
+    setDeviceOptions(payload.options?.devices ?? []);
+    setModelStatus(payload.model_status ?? null);
     setLoadedModelIdentifier(payload.loaded_model_identifier);
   };
 
@@ -136,6 +160,8 @@ export default function DiaApp() {
       setStats(null);
       setTask(null);
       setSettingsForm(emptySettings);
+      setDeviceOptions([]);
+      setModelStatus(null);
       setLoadedModelIdentifier(null);
       setApiKeys([]);
       setCreatedKey(null);
@@ -163,7 +189,7 @@ export default function DiaApp() {
     return false;
   };
 
-  const loadDashboard = async () => {
+  const loadDashboard = async (refreshForm = false) => {
     try {
       const [settingsResponse, statsResponse, taskResponse, keysResponse] = await Promise.all([
         getSettings(),
@@ -172,7 +198,7 @@ export default function DiaApp() {
         listApiKeys(),
       ]);
       startTransition(() => {
-        applySettings(settingsResponse);
+        applySettings(settingsResponse, refreshForm);
         setStats(statsResponse);
         setTask(taskResponse);
         setApiKeys(keysResponse.keys);
@@ -203,7 +229,7 @@ export default function DiaApp() {
 
   useEffect(() => {
     if (!isReady) return;
-    void loadDashboard();
+    void loadDashboard(true);
     const intervalId = window.setInterval(() => void loadDashboard(), POLL_MS);
     return () => window.clearInterval(intervalId);
   }, [authState]);
@@ -306,14 +332,39 @@ export default function DiaApp() {
     setSaveBusy(true);
     try {
       const response = await saveSettings(settingsForm);
-      applySettings(response);
-      setMessage(response.model_reloaded ? "Settings saved and runtime reloaded." : "Settings saved.");
-      setErrorMessage("");
+      applySettings(response, true);
+      if (response.model_reloaded && response.model_loaded === false) {
+        setMessage("Settings saved.");
+        setErrorMessage(`The model could not be loaded: ${response.model_status?.error ?? "see server log."}`);
+      } else {
+        setMessage(response.model_reloaded ? "Settings saved and model loaded." : "Settings saved.");
+        setErrorMessage("");
+      }
       await loadDashboard();
     } catch (error) {
       handleApiError(error, "Saving settings failed.");
     } finally {
       setSaveBusy(false);
+    }
+  };
+
+  const handleLoadModel = async () => {
+    setModelLoadBusy(true);
+    setMessage("");
+    setErrorMessage("");
+    try {
+      const response = await loadModel();
+      setModelStatus(response.model_status);
+      setLoadedModelIdentifier(response.loaded_model_identifier);
+      if (response.model_loaded) {
+        setMessage(`Model loaded on ${response.model_status.device ?? "the selected device"}.`);
+      } else {
+        setErrorMessage(`The model could not be loaded: ${response.model_status.error ?? "see server log."}`);
+      }
+    } catch (error) {
+      handleApiError(error, "Loading the model failed.");
+    } finally {
+      setModelLoadBusy(false);
     }
   };
 
@@ -441,7 +492,14 @@ export default function DiaApp() {
   }
 
   const history = (stats?.history ?? []) as HistoryEntry[];
-  const loadedModelLabel = loadedModelIdentifier?.[0] || settingsForm.diarization_model_id || "No model loaded";
+  const loadedModelLabel = loadedModelIdentifier?.[0] || "No model loaded";
+  const liveModelStatus = task?.model_status ?? modelStatus;
+  const modelStateLabel = liveModelStatus ? MODEL_STATE_LABELS[liveModelStatus.state] ?? liveModelStatus.state : "n/a";
+  const tokenSourceLabel = liveModelStatus?.token_source ? TOKEN_SOURCE_LABELS[liveModelStatus.token_source] : "No token found";
+  // Keep a saved device selectable even if this host no longer reports it.
+  const deviceSelectOptions = deviceOptions.some((option) => option.value === settingsForm.gpu_device)
+    ? deviceOptions
+    : [...deviceOptions, { label: `${settingsForm.gpu_device} (not detected)`, value: settingsForm.gpu_device }];
 
   return (
     <main className="shell">
@@ -607,9 +665,17 @@ export default function DiaApp() {
           </div>
           <form className="settings-form" onSubmit={handleSaveSettings}>
             <label className="full-width"><span>Active Model</span><input value={settingsForm.diarization_model_id} readOnly /></label>
+            <label className="full-width">
+              <span>Device</span>
+              <select value={settingsForm.gpu_device} onChange={(event) => setSettingsForm((current) => ({ ...current, gpu_device: event.target.value }))}>
+                {deviceSelectOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
             <label className="full-width"><span>Model Cache Path</span><input value={settingsForm.model_cache_path} onChange={(event) => setSettingsForm((current) => ({ ...current, model_cache_path: event.target.value }))} /></label>
             <label className="full-width"><span>Hugging Face Token</span><input type="password" placeholder="hf_... (optional)" value={settingsForm.huggingface_token} onChange={(event) => setSettingsForm((current) => ({ ...current, huggingface_token: event.target.value }))} /></label>
-            <p className="field-note full-width">Save the token here if the server should be able to load the gated pyannote model again after restart.</p>
+            <p className="field-note full-width">Save the token here if the server should be able to load the gated pyannote model again after restart. Changing the token, cache path or device reloads the model immediately.</p>
             <div className="form-actions full-width">
               <button type="submit" disabled={saveBusy}>{saveBusy ? "Saving..." : "Save Settings"}</button>
             </div>
@@ -621,10 +687,23 @@ export default function DiaApp() {
             <div><span className="eyebrow">Runtime</span><h2>Model and Request Details</h2></div>
           </div>
           <div className="metric-grid compact-metrics">
+            <div className="metric-card"><span>Model Status</span><strong>{modelStateLabel}</strong></div>
+            <div className="metric-card"><span>Device</span><strong>{liveModelStatus?.device || "n/a"}</strong></div>
             <div className="metric-card"><span>Loaded Model</span><strong>{loadedModelLabel}</strong></div>
+            <div className="metric-card"><span>Hugging Face Token</span><strong>{tokenSourceLabel}</strong></div>
             <div className="metric-card"><span>Current Task</span><strong>{task?.current_task.task_name || "Idle"}</strong></div>
             <div className="metric-card"><span>Task Progress</span><strong>{formatFixed(task?.current_task.progress, 1, "%")}</strong></div>
-            <div className="metric-card"><span>Pending Requests</span><strong>{task?.pending_requests ?? 0}</strong></div>
+          </div>
+          {liveModelStatus?.state === "error" && liveModelStatus.error && (
+            <p className="message error">Model load error: {liveModelStatus.error}</p>
+          )}
+          {liveModelStatus?.state === "not_loaded" && (
+            <p className="dashboard-note">The model loads on the first request. Use the button to load it now and check the token and device.</p>
+          )}
+          <div className="form-actions">
+            <button type="button" disabled={modelLoadBusy || liveModelStatus?.state === "loading"} onClick={() => void handleLoadModel()}>
+              {modelLoadBusy || liveModelStatus?.state === "loading" ? "Loading model..." : "Load Model Now"}
+            </button>
           </div>
           <div className="key-token-card">
             <div className="key-card-head">

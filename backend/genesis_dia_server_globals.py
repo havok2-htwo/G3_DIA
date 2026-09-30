@@ -28,6 +28,7 @@ def resolve_model_cache_path(cache_path: str) -> str:
 
 settings_lock = threading.Lock()
 model_load_lock = threading.Lock()
+model_status_lock = threading.Lock()
 history_lock = threading.Lock()
 task_status_lock = threading.Lock()
 task_runtime_lock = threading.Lock()
@@ -38,7 +39,16 @@ current_task_status: Dict[str, Any] = {
     "progress": 0.0,
     "details": "Server is ready.",
 }
-diarization_pipeline: Dict[str, Any] = {"pipeline": None, "model_identifier": None}
+diarization_pipeline: Dict[str, Any] = {"pipeline": None, "model_identifier": None, "device": None}
+# Last model load outcome for the admin UI. Guarded by its own lock so the
+# dashboard poll never waits on a running (possibly downloading) model load.
+model_status: Dict[str, Any] = {
+    "state": "not_loaded",  # not_loaded | loading | loaded | error
+    "error": None,
+    "device": None,
+    "token_source": None,  # settings | env | None
+    "updated_at": None,
+}
 diarization_history = deque(maxlen=HISTORY_MAX_LEN)
 task_runtime_state: Dict[str, Any] = {
     "worker_running": False,

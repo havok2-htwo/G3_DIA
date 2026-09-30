@@ -17,7 +17,8 @@ if [ ! -f "${SETTINGS_FILE}" ]; then
 {
     "diarization_model_id": "pyannote/speaker-diarization-community-1",
     "model_cache_path": "/app/models",
-    "huggingface_token": ""
+    "huggingface_token": "",
+    "gpu_device": "auto"
 }
 JSON
 fi

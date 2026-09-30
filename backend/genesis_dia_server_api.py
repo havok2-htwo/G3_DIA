@@ -314,6 +314,7 @@ def create_api(app: FastAPI) -> FastAPI:
         with settings_lock:
             model_id = str(current_settings.get("diarization_model_id", ""))
         model_loaded = diarization_pipeline.get("pipeline") is not None
+        loaded_device = diarization_pipeline.get("device")
         return {
             "api_version": "2.0",
             "exclusive_diarization": True,
@@ -322,7 +323,7 @@ def create_api(app: FastAPI) -> FastAPI:
             "model": {
                 "id": model_id,
                 "status": "loaded" if model_loaded else "not_loaded",
-                "device": "cuda" if torch.cuda.is_available() else "cpu",
+                "device": str(loaded_device) if loaded_device is not None else ("cuda" if torch.cuda.is_available() else "cpu"),
             },
         }
 

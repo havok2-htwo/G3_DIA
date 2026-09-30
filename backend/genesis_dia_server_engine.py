@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import os
 import sys
 from pathlib import Path
@@ -9,11 +10,14 @@ import numpy as np
 import torch
 from dotenv import load_dotenv
 
+from .genesis_dia_server_devices import DeviceUnavailableError, resolve_device
 from .genesis_dia_server_globals import (
     current_settings,
     current_task_status,
     diarization_pipeline,
     model_load_lock,
+    model_status,
+    model_status_lock,
     resolve_model_cache_path,
     settings_lock,
     task_status_lock,
@@ -23,11 +27,11 @@ from .genesis_dia_server_gpu_lease import acquire_gpu_lease
 HUGGING_FACE_TOKEN = None
 
 
-def _resolve_huggingface_token() -> str | None:
+def _resolve_huggingface_token_with_source() -> tuple[str | None, str | None]:
     with settings_lock:
         settings_token = str(current_settings.get("huggingface_token", "")).strip()
     if settings_token:
-        return settings_token
+        return settings_token, "settings"
 
     load_dotenv()
     env_token = str(
@@ -36,7 +40,82 @@ def _resolve_huggingface_token() -> str | None:
         or os.getenv("HUGGING_FACE_HUB_TOKEN")
         or ""
     ).strip()
-    return env_token or None
+    return (env_token, "env") if env_token else (None, None)
+
+
+def _resolve_huggingface_token() -> str | None:
+    return _resolve_huggingface_token_with_source()[0]
+
+
+def _set_model_status(state: str, *, error: str | None = None, device: str | None = None, token_source: str | None = None) -> None:
+    with model_status_lock:
+        model_status.update(
+            {
+                "state": state,
+                "error": error,
+                "device": device,
+                "token_source": token_source,
+                "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+
+
+def get_model_status() -> Dict[str, Any]:
+    with model_status_lock:
+        return dict(model_status)
+
+
+def _gated_access_hint(model_id: str) -> str:
+    return (
+        f"Bitte pruefen: (1) Auf https://hf.co/{model_id} mit dem Konto, dem der Token gehoert, die "
+        "Nutzungsbedingungen akzeptieren. (2) Ein 'fine-grained' Token braucht die Berechtigung "
+        "'Read access to contents of all public gated repos you can access' (oder einen 'Read'-Token verwenden)."
+    )
+
+
+def _describe_load_error(exc: BaseException, model_id: str, token: str | None) -> str:
+    """Turn a pipeline load failure into an actionable admin-UI message."""
+
+    raw = f"{type(exc).__name__}: {exc}".strip()
+    lowered = raw.lower()
+    if "no module named 'omegaconf'" in lowered:
+        return "Fehlende Python-Abhaengigkeit 'omegaconf'. Bitte die Server-venv mit requirements.txt aktualisieren."
+
+    try:
+        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, LocalEntryNotFoundError
+    except ImportError:  # pragma: no cover - very old huggingface_hub
+        GatedRepoError = HfHubHTTPError = LocalEntryNotFoundError = ()  # type: ignore[assignment]
+
+    network_markers = (
+        "name resolution",
+        "max retries",
+        "connection refused",
+        "connecterror",
+        "connectionerror",
+        "timed out",
+        "network is unreachable",
+        "offline mode",
+    )
+    if (LocalEntryNotFoundError and isinstance(exc, LocalEntryNotFoundError)) or any(
+        marker in lowered for marker in network_markers
+    ):
+        return (
+            "Hugging Face ist vom Server/Container aus nicht erreichbar und das Modell liegt noch nicht im Cache "
+            "(DNS, Proxy oder Firewall pruefen; ein Browser auf dem Host nutzt evtl. einen anderen Proxy). "
+            f"Details: {raw}"
+        )
+
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    gated = (GatedRepoError and isinstance(exc, GatedRepoError)) or status_code in (401, 403) or any(
+        marker in lowered
+        for marker in ("401 client error", "403 client error", "gated", "unauthorized", "forbidden", "access to model")
+    )
+    if gated or (HfHubHTTPError and isinstance(exc, HfHubHTTPError)):
+        if not token:
+            return f"Kein Hugging Face Token gesetzt, das Modell ist aber zugangsbeschraenkt. {_gated_access_hint(model_id)} Details: {raw}"
+        return f"Hugging Face hat den Zugriff auf '{model_id}' abgelehnt. {_gated_access_hint(model_id)} Details: {raw}"
+
+    return raw
 
 
 def _repo_dir_name(model_id: str) -> str:
@@ -96,7 +175,16 @@ def _load_diarization_model_unleased() -> bool:
     with settings_lock:
         model_id = str(current_settings.get("diarization_model_id", "")).strip()
         resolved_cache_path = resolve_model_cache_path(str(current_settings.get("model_cache_path", "")).strip())
-    target_identifier = (model_id, resolved_cache_path)
+        device_setting = str(current_settings.get("gpu_device", "auto"))
+    token, token_source = _resolve_huggingface_token_with_source()
+
+    try:
+        device = resolve_device(device_setting)
+    except DeviceUnavailableError as exc:
+        print(f"[FEHLER-DIA] {exc}", file=sys.stderr)
+        _set_model_status("error", error=str(exc), token_source=token_source)
+        return False
+    target_identifier = (model_id, resolved_cache_path, str(device))
 
     with model_load_lock:
         if (
@@ -105,18 +193,20 @@ def _load_diarization_model_unleased() -> bool:
         ):
             return True
 
+        _set_model_status("loading", device=str(device), token_source=token_source)
         if diarization_pipeline.get("pipeline") is not None:
             print("[INFO-DIA] Entlade altes Diarisierungs-Modell...", file=sys.stderr)
             diarization_pipeline["pipeline"] = None
             diarization_pipeline["model_identifier"] = None
+            diarization_pipeline["device"] = None
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        print(f"[INFO-DIA] Lade Sprecher-Diarisierungs-Modell ({model_id})...", file=sys.stderr)
+        print(f"[INFO-DIA] Lade Sprecher-Diarisierungs-Modell ({model_id}) auf '{device}'...", file=sys.stderr)
 
-        HUGGING_FACE_TOKEN = _resolve_huggingface_token()
+        HUGGING_FACE_TOKEN = token
         if HUGGING_FACE_TOKEN:
-            print("[INFO-DIA] Hugging Face Token aus Settings/.env geladen.", file=sys.stderr)
+            print(f"[INFO-DIA] Hugging Face Token aus {'Settings' if token_source == 'settings' else '.env/Umgebung'} geladen.", file=sys.stderr)
         else:
             print(
                 "[WARNUNG-DIA] Kein Hugging Face Token in Settings/.env gefunden. Versuche Cache-/Hub-Load trotzdem.",
@@ -124,30 +214,38 @@ def _load_diarization_model_unleased() -> bool:
             )
 
         try:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             pretrained_source, cache_dir = _resolve_diarization_pretrained_source(model_id, resolved_cache_path)
             if pretrained_source != model_id:
                 print(f"[INFO-DIA] Verwende lokales Cache-Modell fuer Diarisierung: {pretrained_source}", file=sys.stderr)
-            elif cache_dir:
-                print(f"[INFO-DIA] Verwende Hugging-Face-Cache fuer Diarisierung: {cache_dir}", file=sys.stderr)
+            else:
+                if cache_dir:
+                    print(f"[INFO-DIA] Verwende Hugging-Face-Cache fuer Diarisierung: {cache_dir}", file=sys.stderr)
+                if HUGGING_FACE_TOKEN and not HUGGING_FACE_TOKEN.startswith("hf_"):
+                    # pyannote silently drops tokens without the hf_ prefix (it takes them
+                    # for pyannoteAI keys), which then surfaces as a misleading gated error.
+                    raise ValueError(
+                        "Der Hugging Face Token beginnt nicht mit 'hf_'. pyannote verwirft solche Tokens "
+                        "stillschweigend. Bitte den Token unter https://hf.co/settings/tokens neu kopieren."
+                    )
 
             pipeline = _from_pretrained_any(pretrained_source, HUGGING_FACE_TOKEN, cache_dir)
+            if pipeline is None:
+                raise RuntimeError(f"pyannote konnte keine Pipeline-Konfiguration fuer '{model_id}' laden.")
             pipeline.to(device)
 
             diarization_pipeline["pipeline"] = pipeline
             diarization_pipeline["model_identifier"] = target_identifier
+            diarization_pipeline["device"] = device
+            _set_model_status("loaded", device=str(device), token_source=token_source)
             print(f"[INFO-DIA] Diarisierungs-Modell erfolgreich auf '{device}' geladen.", file=sys.stderr)
             return True
         except Exception as exc:
-            error_message = str(exc)
-            if "No module named 'omegaconf'" in error_message:
-                error_message = (
-                    "Fehlende Python-Abhaengigkeit 'omegaconf'. "
-                    "Bitte die Server-venv mit requirements.txt aktualisieren."
-                )
+            error_message = _describe_load_error(exc, model_id, HUGGING_FACE_TOKEN)
             print(f"[FEHLER-DIA] Kritisches Problem beim Laden des Diarisierungs-Modells: {error_message}", file=sys.stderr)
             diarization_pipeline["pipeline"] = None
             diarization_pipeline["model_identifier"] = None
+            diarization_pipeline["device"] = None
+            _set_model_status("error", error=error_message, device=str(device), token_source=token_source)
             return False
 
 
@@ -275,9 +373,8 @@ def _run_diarization_pipeline_unleased(
     max_speakers: Optional[int] = None,
 ) -> Any:
     if not _load_diarization_model_unleased():
-        raise RuntimeError(
-            "Das Diarisierungs-Modell konnte nicht geladen werden. Pruefen Sie die Server-Logs und den Hugging Face Token."
-        )
+        reason = get_model_status().get("error") or "Pruefen Sie die Server-Logs und den Hugging Face Token."
+        raise RuntimeError(f"Das Diarisierungs-Modell konnte nicht geladen werden: {reason}")
 
     pipeline = diarization_pipeline.get("pipeline")
     if pipeline is None:

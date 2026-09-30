@@ -20,7 +20,8 @@ from .genesis_dia_server_auth import (
     require_session,
     set_session_cookie,
 )
-from .genesis_dia_server_engine import load_diarization_model, diarize_audio
+from .genesis_dia_server_devices import list_device_options
+from .genesis_dia_server_engine import diarize_audio, get_model_status, load_diarization_model
 from .genesis_dia_server_gpu_lease import run_blocking_gpu_phase
 from .genesis_dia_server_globals import (
     current_settings,
@@ -40,6 +41,11 @@ class AdminSettingsPayload(BaseModel):
     diarization_model_id: str
     model_cache_path: str
     huggingface_token: str
+    # Optional so an older dashboard that does not know the field keeps the saved device.
+    gpu_device: str | None = None
+
+
+MODEL_SETTING_KEYS = ("diarization_model_id", "model_cache_path", "huggingface_token", "gpu_device")
 
 
 class LoginPayload(BaseModel):
@@ -60,6 +66,23 @@ def _serialize_settings() -> Dict[str, Any]:
     with settings_lock:
         settings_copy = current_settings.copy()
     return normalize_settings(settings_copy)
+
+
+def _loaded_model_identifier() -> list | None:
+    model_identifier = diarization_pipeline.get("model_identifier")
+    return list(model_identifier) if model_identifier else None
+
+
+def _pipeline_cuda_index() -> int | None:
+    device = diarization_pipeline.get("device")
+    if device is None or getattr(device, "type", None) != "cuda":
+        return None
+    return device.index if device.index is not None else int(torch.cuda.current_device())
+
+
+def _model_load_failure_detail(prefix: str) -> str:
+    reason = get_model_status().get("error")
+    return f"{prefix}: {reason}" if reason else f"{prefix}."
 
 
 def _reset_peak_vram_tracking(cuda_index: int | None) -> None:
@@ -117,10 +140,10 @@ async def _run_admin_benchmark(request: Request, audio_data, repeat_count: int) 
             if not await run_blocking_gpu_phase(load_diarization_model):
                 raise HTTPException(
                     status_code=500,
-                    detail="Diarisierungs-Modell konnte fuer den Benchmark nicht geladen werden.",
+                    detail=_model_load_failure_detail("Diarisierungs-Modell konnte fuer den Benchmark nicht geladen werden"),
                 )
 
-            cuda_index = int(torch.cuda.current_device()) if torch.cuda.is_available() else None
+            cuda_index = _pipeline_cuda_index()
             await run_blocking_gpu_phase(_reset_peak_vram_tracking, cuda_index)
             with task_runtime_lock:
                 task_runtime_state["worker_running"] = True
@@ -249,10 +272,24 @@ def create_admin_api(app: FastAPI) -> FastAPI:
 
     @app.get("/api/admin/settings")
     async def admin_get_settings(_: dict[str, str] = Depends(require_admin)):
-        model_identifier = diarization_pipeline.get("model_identifier")
         return {
             "settings": _serialize_settings(),
-            "loaded_model_identifier": list(model_identifier) if model_identifier else None,
+            "options": {"devices": list_device_options()},
+            "loaded_model_identifier": _loaded_model_identifier(),
+            "model_status": get_model_status(),
+        }
+
+    @app.post("/api/admin/model/load")
+    async def admin_load_model(request: Request, _: dict[str, str] = Depends(require_admin)):
+        """Load (or confirm) the pipeline with the saved settings, e.g. right after entering a token."""
+
+        async with request.app.state.local_gpu_lock:
+            model_loaded = await run_blocking_gpu_phase(load_diarization_model)
+        return {
+            "ok": bool(model_loaded),
+            "model_loaded": bool(model_loaded),
+            "loaded_model_identifier": _loaded_model_identifier(),
+            "model_status": get_model_status(),
         }
 
     @app.put("/api/admin/settings")
@@ -262,6 +299,9 @@ def create_admin_api(app: FastAPI) -> FastAPI:
         _: dict[str, str] = Depends(require_admin),
     ):
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        with settings_lock:
+            if payload_data.get("gpu_device") is None:
+                payload_data["gpu_device"] = current_settings.get("gpu_device", "auto")
         normalized = normalize_settings(payload_data)
         with settings_lock:
             previous_settings = current_settings.copy()
@@ -271,21 +311,21 @@ def create_admin_api(app: FastAPI) -> FastAPI:
             current_settings.update(saved_settings)
 
         model_settings_changed = any(
-            previous_settings.get(key) != saved_settings.get(key)
-            for key in ("diarization_model_id", "model_cache_path", "huggingface_token")
+            previous_settings.get(key) != saved_settings.get(key) for key in MODEL_SETTING_KEYS
         )
         model_loaded = None
         if model_settings_changed:
             async with request.app.state.local_gpu_lock:
                 model_loaded = await run_blocking_gpu_phase(load_diarization_model)
 
-        model_identifier = diarization_pipeline.get("model_identifier")
         return {
             "ok": True,
             "settings": _serialize_settings(),
+            "options": {"devices": list_device_options()},
             "model_reloaded": model_settings_changed,
             "model_loaded": model_loaded,
-            "loaded_model_identifier": list(model_identifier) if model_identifier else None,
+            "loaded_model_identifier": _loaded_model_identifier(),
+            "model_status": get_model_status(),
         }
 
     @app.get("/api/admin/stats")
@@ -314,11 +354,11 @@ def create_admin_api(app: FastAPI) -> FastAPI:
             runtime_snapshot = dict(task_runtime_state)
         with task_status_lock:
             task_snapshot = dict(current_task_status)
-        model_identifier = diarization_pipeline.get("model_identifier")
         return {
             **runtime_snapshot,
             "current_task": task_snapshot,
-            "loaded_model_identifier": list(model_identifier) if model_identifier else None,
+            "loaded_model_identifier": _loaded_model_identifier(),
+            "model_status": get_model_status(),
         }
 
     @app.post("/api/admin/benchmark")

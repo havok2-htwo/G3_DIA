@@ -2,11 +2,34 @@ export type AdminSettings = {
   diarization_model_id: string;
   model_cache_path: string;
   huggingface_token: string;
+  gpu_device: string;
+};
+
+export type AdminOption = {
+  label: string;
+  value: string;
+};
+
+export type ModelStatus = {
+  state: "not_loaded" | "loading" | "loaded" | "error";
+  error: string | null;
+  device: string | null;
+  token_source: "settings" | "env" | null;
+  updated_at: string | null;
 };
 
 export type SettingsResponse = {
   settings: AdminSettings;
+  options: { devices: AdminOption[] };
   loaded_model_identifier: string[] | null;
+  model_status: ModelStatus;
+};
+
+export type ModelLoadResponse = {
+  ok: boolean;
+  model_loaded: boolean;
+  loaded_model_identifier: string[] | null;
+  model_status: ModelStatus;
 };
 
 export type StatsResponse = {
@@ -35,6 +58,7 @@ export type TaskResponse = {
     details: string;
   };
   loaded_model_identifier: string[] | null;
+  model_status: ModelStatus;
 };
 
 export type BenchmarkResponse = {
@@ -178,6 +202,10 @@ export async function saveSettings(settings: AdminSettings) {
       body: JSON.stringify(settings),
     },
   );
+}
+
+export async function loadModel() {
+  return requestJson<ModelLoadResponse>("/api/admin/model/load", { method: "POST" });
 }
 
 export async function getStats() {

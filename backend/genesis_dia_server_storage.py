@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import Any, Dict, Optional
 
@@ -16,7 +17,22 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "diarization_model_id": DEFAULT_DIARIZATION_MODEL_ID,
     "model_cache_path": ".\\models",
     "huggingface_token": "",
+    "gpu_device": "auto",
 }
+
+
+def normalize_device_setting(value: Any) -> str:
+    """Accept ``auto``, ``cpu``, ``cuda`` and ``cuda:N``; anything else means ``auto``."""
+
+    text = str(value or "").strip().lower()
+    if text == "cpu":
+        return "cpu"
+    if text == "cuda":
+        return "cuda:0"
+    match = re.fullmatch(r"cuda:(\d+)", text)
+    if match:
+        return f"cuda:{int(match.group(1))}"
+    return "auto"
 
 
 def normalize_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -27,6 +43,7 @@ def normalize_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     normalized["diarization_model_id"] = model_id or DEFAULT_SETTINGS["diarization_model_id"]
     normalized["model_cache_path"] = str(source.get("model_cache_path", DEFAULT_SETTINGS["model_cache_path"])).strip()
     normalized["huggingface_token"] = str(source.get("huggingface_token", "")).strip()
+    normalized["gpu_device"] = normalize_device_setting(source.get("gpu_device", DEFAULT_SETTINGS["gpu_device"]))
     return normalized
 
 

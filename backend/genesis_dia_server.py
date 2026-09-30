@@ -27,7 +27,8 @@ async def startup_server(app: FastAPI):
     print(
         f"Geladene Start-Konfiguration: "
         f"Modell='{current_settings['diarization_model_id']}', "
-        f"Cache-Pfad='{current_settings['model_cache_path'] or 'Standard'}'",
+        f"Cache-Pfad='{current_settings['model_cache_path'] or 'Standard'}', "
+        f"Geraet='{current_settings.get('gpu_device', 'auto')}'",
         file=sys.stderr,
     )
 
