@@ -105,12 +105,12 @@ class ModelLoadStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "error")
         self.assertIn("keine Pipeline-Konfiguration", status["error"])
 
-    def test_http_401_explains_gated_access(self) -> None:
-        error = RuntimeError("401 Client Error: Unauthorized for url: https://huggingface.co/...")
+    def test_gated_error_during_load_explains_access(self) -> None:
+        error = _hub_error(403, "Access to model is restricted", error_class="GatedRepoError")
         with mock.patch.object(engine, "_from_pretrained_any", side_effect=error):
             self.assertFalse(engine._load_diarization_model_unleased())
         message = engine.get_model_status()["error"]
-        self.assertIn("abgelehnt", message)
+        self.assertIn("verweigert", message)
         self.assertIn("https://hf.co/pyannote/speaker-diarization-community-1", message)
         self.assertIn("gated repos", message)
 
@@ -120,12 +120,129 @@ class ModelLoadStatusTests(unittest.TestCase):
             self.assertFalse(engine._load_diarization_model_unleased())
         self.assertIn("nicht erreichbar", engine.get_model_status()["error"])
 
-    def test_token_without_hf_prefix_is_rejected_before_download(self) -> None:
+    def test_token_without_hf_prefix_still_loads_but_failures_mention_it(self) -> None:
         current_settings["huggingface_token"] = "abc123"
-        with mock.patch.object(engine, "_from_pretrained_any") as from_pretrained:
+        with mock.patch.object(engine, "_from_pretrained_any", return_value=mock.Mock()):
+            self.assertTrue(engine._load_diarization_model_unleased())
+
+        diarization_pipeline.update({"pipeline": None, "model_identifier": None, "device": None})
+        with mock.patch.object(engine, "_from_pretrained_any", side_effect=_hub_error(401, "Invalid credentials")):
             self.assertFalse(engine._load_diarization_model_unleased())
+        self.assertIn("beginnt nicht mit 'hf_'", engine.get_model_status()["error"])
+
+    def test_cached_fast_path_clears_a_stale_error(self) -> None:
+        with mock.patch.object(engine, "_from_pretrained_any", return_value=mock.Mock()):
+            self.assertTrue(engine._load_diarization_model_unleased())
+        engine._set_model_status("error", error="old failure")
+        with mock.patch.object(engine, "_from_pretrained_any") as from_pretrained:
+            self.assertTrue(engine._load_diarization_model_unleased())
         from_pretrained.assert_not_called()
-        self.assertIn("hf_", engine.get_model_status()["error"])
+        self.assertEqual(engine.get_model_status()["state"], "loaded")
+        self.assertIsNone(engine.get_model_status()["error"])
+
+    def test_invalid_device_unloads_the_old_pipeline(self) -> None:
+        with mock.patch.object(engine, "_from_pretrained_any", return_value=mock.Mock()):
+            self.assertTrue(engine._load_diarization_model_unleased())
+        with mock.patch.object(engine, "resolve_device", side_effect=devices.DeviceUnavailableError("GPU 'cuda:3' existiert nicht")):
+            self.assertFalse(engine._load_diarization_model_unleased())
+        self.assertIsNone(diarization_pipeline["pipeline"])
+        self.assertEqual(engine.get_model_status()["state"], "error")
+
+    def test_lease_failure_is_reported_in_status(self) -> None:
+        with mock.patch.object(engine, "acquire_gpu_lease", side_effect=PermissionError("gpu.lock")):
+            self.assertFalse(engine.load_diarization_model())
+        self.assertIn("PermissionError", engine.get_model_status()["error"])
+
+    def test_cpu_device_skips_the_shared_gpu_lease(self) -> None:
+        with mock.patch.object(engine, "resolve_device", return_value=torch.device("cpu")):
+            self.assertFalse(engine._uses_gpu_lease())
+        with mock.patch.object(engine, "resolve_device", return_value=torch.device("cuda:0")):
+            self.assertTrue(engine._uses_gpu_lease())
+
+
+def _hub_error(status: int, server_message: str = "", *, error_class: str = "HfHubHTTPError", hf_headers: bool = True):
+    import requests
+    import huggingface_hub.errors as hf_errors
+
+    response = requests.Response()
+    response.status_code = status
+    if hf_headers:
+        response.headers["X-Request-Id"] = "req-1"
+        if server_message:
+            response.headers["X-Error-Message"] = server_message
+    return getattr(hf_errors, error_class)(f"{status} Client Error: {server_message}", response=response)
+
+
+class DescribeLoadErrorTests(unittest.TestCase):
+    MODEL = "pyannote/speaker-diarization-community-1"
+
+    def _describe(self, exc: BaseException, token: str | None = "hf_x") -> str:
+        return engine._describe_load_error(exc, self.MODEL, token)
+
+    def test_fine_grained_403_hidden_behind_connection_error_is_found(self) -> None:
+        import huggingface_hub.errors as hf_errors
+
+        try:
+            try:
+                raise _hub_error(403, "Please enable access to public gated repositories in your fine-grained token settings")
+            except Exception as cause:
+                raise hf_errors.LocalEntryNotFoundError("Please check your connection") from cause
+        except Exception as exc:
+            message = self._describe(exc)
+        self.assertIn("fine-grained Token", message)
+        self.assertNotIn("nicht erreichbar", message)
+
+    def test_gated_repo_error_gets_the_accept_terms_hint(self) -> None:
+        message = self._describe(_hub_error(403, "Access restricted", error_class="GatedRepoError"))
+        self.assertIn("Nutzungsbedingungen", message)
+
+    def test_invalid_token_401_asks_for_a_new_token(self) -> None:
+        message = self._describe(_hub_error(401, "Invalid credentials in Authorization header"))
+        self.assertIn("Token abgelehnt", message)
+        self.assertNotIn("Nutzungsbedingungen", message)
+
+    def test_403_without_hub_headers_points_at_a_proxy(self) -> None:
+        message = self._describe(_hub_error(403, hf_headers=False))
+        self.assertIn("Proxy", message)
+
+    def test_missing_repo_rate_limit_and_outage_are_not_called_gated(self) -> None:
+        self.assertIn("nicht gefunden", self._describe(_hub_error(404, error_class="RepositoryNotFoundError")))
+        self.assertIn("HTTP 429", self._describe(_hub_error(429)))
+        self.assertIn("HTTP 503", self._describe(_hub_error(503)))
+
+    def test_missing_cache_file_suggests_deleting_the_cache(self) -> None:
+        message = self._describe(FileNotFoundError("snapshots/abc/segmentation/pytorch_model.bin"))
+        self.assertIn("models--pyannote--speaker-diarization-community-1", message)
+
+    def test_unrelated_type_error_is_not_masked(self) -> None:
+        pipeline_class = mock.Mock()
+        pipeline_class.from_pretrained.side_effect = TypeError("Klass() got an unexpected keyword argument 'foo'")
+        with mock.patch.dict("sys.modules", {"pyannote.audio": mock.Mock(Pipeline=pipeline_class)}):
+            with self.assertRaisesRegex(TypeError, "'foo'"):
+                engine._from_pretrained_any(self.MODEL, "hf_x", None)
+        self.assertEqual(pipeline_class.from_pretrained.call_count, 1)
+
+
+class SnapshotCompletenessTests(unittest.TestCase):
+    def test_config_without_weights_is_not_used_as_local_snapshot(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as cache:
+            snapshot = Path(cache) / "models--pyannote--speaker-diarization-community-1" / "snapshots" / "abc"
+            snapshot.mkdir(parents=True)
+            (snapshot / "config.yaml").write_text(
+                "pipeline:\n  params:\n    segmentation:\n      subfolder: segmentation\n"
+                "    embedding:\n      subfolder: embedding\n    plda:\n      subfolder: plda\n",
+                encoding="utf-8",
+            )
+            model_id = "pyannote/speaker-diarization-community-1"
+            self.assertEqual(engine._resolve_diarization_pretrained_source(model_id, cache), (model_id, cache))
+
+            for sub, name in (("segmentation", "pytorch_model.bin"), ("embedding", "pytorch_model.bin"), ("plda", "plda.npz")):
+                (snapshot / sub).mkdir()
+                (snapshot / sub / name).write_bytes(b"x")
+            self.assertEqual(engine._resolve_diarization_pretrained_source(model_id, cache), (str(snapshot), cache))
 
     def test_missing_gpu_is_reported_without_loading(self) -> None:
         current_settings["gpu_device"] = "cuda:5"

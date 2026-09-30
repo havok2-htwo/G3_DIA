@@ -21,17 +21,17 @@ def configured_gpu_lease_path() -> str | None:
 
 
 @contextmanager
-def acquire_gpu_lease() -> Iterator[None]:
+def acquire_gpu_lease(enabled: bool = True) -> Iterator[None]:
     """Serialize CUDA work with other GENESIS processes when configured.
 
     The local FastAPI asyncio lock protects this DIA process.  This optional
     file lock additionally coordinates DIA and Whisper containers that share a
-    GPU and a mounted lock-file path.  CPU-only processes and an unset env var
-    intentionally remain no-ops.
+    GPU and a mounted lock-file path.  CPU-only processes, work pinned to the
+    CPU (``enabled=False``) and an unset env var intentionally remain no-ops.
     """
 
     lock_path = configured_gpu_lease_path()
-    if lock_path is None or not torch.cuda.is_available():
+    if not enabled or lock_path is None or not torch.cuda.is_available():
         yield
         return
 

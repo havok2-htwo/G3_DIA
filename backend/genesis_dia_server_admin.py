@@ -21,7 +21,7 @@ from .genesis_dia_server_auth import (
     set_session_cookie,
 )
 from .genesis_dia_server_devices import list_device_options
-from .genesis_dia_server_engine import diarize_audio, get_model_status, load_diarization_model
+from .genesis_dia_server_engine import diarize_audio, get_model_status, get_token_source, load_diarization_model
 from .genesis_dia_server_gpu_lease import run_blocking_gpu_phase
 from .genesis_dia_server_globals import (
     current_settings,
@@ -78,6 +78,12 @@ def _pipeline_cuda_index() -> int | None:
     if device is None or getattr(device, "type", None) != "cuda":
         return None
     return device.index if device.index is not None else int(torch.cuda.current_device())
+
+
+def _model_status_payload() -> Dict[str, Any]:
+    """Model status plus the token source as it is *now*, not as of the last load attempt."""
+
+    return {**get_model_status(), "token_source": get_token_source()}
 
 
 def _model_load_failure_detail(prefix: str) -> str:
@@ -276,7 +282,7 @@ def create_admin_api(app: FastAPI) -> FastAPI:
             "settings": _serialize_settings(),
             "options": {"devices": list_device_options()},
             "loaded_model_identifier": _loaded_model_identifier(),
-            "model_status": get_model_status(),
+            "model_status": _model_status_payload(),
         }
 
     @app.post("/api/admin/model/load")
@@ -289,7 +295,7 @@ def create_admin_api(app: FastAPI) -> FastAPI:
             "ok": bool(model_loaded),
             "model_loaded": bool(model_loaded),
             "loaded_model_identifier": _loaded_model_identifier(),
-            "model_status": get_model_status(),
+            "model_status": _model_status_payload(),
         }
 
     @app.put("/api/admin/settings")
@@ -325,7 +331,7 @@ def create_admin_api(app: FastAPI) -> FastAPI:
             "model_reloaded": model_settings_changed,
             "model_loaded": model_loaded,
             "loaded_model_identifier": _loaded_model_identifier(),
-            "model_status": get_model_status(),
+            "model_status": _model_status_payload(),
         }
 
     @app.get("/api/admin/stats")
@@ -358,7 +364,7 @@ def create_admin_api(app: FastAPI) -> FastAPI:
             **runtime_snapshot,
             "current_task": task_snapshot,
             "loaded_model_identifier": _loaded_model_identifier(),
-            "model_status": get_model_status(),
+            "model_status": _model_status_payload(),
         }
 
     @app.post("/api/admin/benchmark")
