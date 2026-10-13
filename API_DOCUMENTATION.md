@@ -224,9 +224,11 @@ the preload wait for it. Takes effect at the next start.
 
 `skip_inactive_embeddings` (default `true`) runs the speaker-embedding network only
 for (chunk, speaker) slots in which that speaker is active; inactive slots get the
-constant embedding the network returns for an all-zero mask. The result is
-byte-identical to the pyannote default path and the embedding phase (~80 % of the
-runtime) shrinks by the share of inactive slots: on this server 30 s clips went from
+constant embedding the network returns for an all-zero mask. Inactive slots are
+bit-identical to the pyannote default path; active slots differ only by fp32 rounding
+(<= ~1e-6) where a slot lands in a differently sized last batch, as in pyannote's own
+last batch. The diarization output was byte-identical on 6 real files (6 s - 69 min).
+The embedding phase (~80 % of the runtime) shrinks by the share of inactive slots: on this server 30 s clips went from
 210 to 100 ms, 5 min from 2.5 to 1.6 s, 47 min from 24.9 to 16.6 s and 69 min from 36.9
 to 20.2 s. A self-check falls back to the default path if the constant does not hold.
 Applies to the next request.

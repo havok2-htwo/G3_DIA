@@ -12,8 +12,10 @@ The embedding phase is ~80 % of diarization time on this box, and in normal
 conversations roughly half of all slots are inactive.  This module computes
 the constant once, verifies it really is input- and batch-size independent,
 then only runs the network on slots with a non-zero mask (repacked into full
-batches) and fills the rest with the constant.  Outputs stay identical to
-upstream: same masks, same full-size batches for active slots, same constant.
+batches) and fills the rest with the constant.  Same masks and the same
+constant as upstream; only slots that end up in a differently sized (last)
+batch than upstream may differ by fp32 rounding (~1e-6, GPU kernels are chosen per
+batch size), exactly like the rows in upstream's own partial last batch.
 
 If the self-check fails (other pyannote/model version, NaN, ...), the pipeline
 keeps the upstream implementation.  Training mode always uses upstream.
