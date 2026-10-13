@@ -12,6 +12,8 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 from .genesis_dia_server_admin import create_admin_api
 from .genesis_dia_server_api import create_api
+from .genesis_dia_server_engine import preload_and_warmup_model
+from .genesis_dia_server_gpu_lease import run_blocking_gpu_phase
 from .genesis_dia_server_globals import current_settings
 from .genesis_dia_server_storage import load_settings
 
@@ -33,10 +35,32 @@ async def startup_server(app: FastAPI):
     )
 
     app.state.local_gpu_lock = asyncio.Lock()
+    app.state.preload_task = None
+    if current_settings.get("preload_model_on_startup", True):
+        # In the background so the port answers immediately; requests queue on the lock.
+        app.state.preload_task = asyncio.create_task(preload_model(app))
+
+
+async def preload_model(app: FastAPI) -> bool:
+    print("[INFO-DIA] Lade Modell beim Start vor (preload_model_on_startup)...", file=sys.stderr)
+    try:
+        async with app.state.local_gpu_lock:
+            return bool(await run_blocking_gpu_phase(preload_and_warmup_model))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # never take the server down; the first request loads lazily
+        print(f"[FEHLER-DIA] Modell-Preload fehlgeschlagen: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return False
 
 
 async def shutdown_server(app: FastAPI):
-    _ = app
+    task = getattr(app.state, "preload_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 @asynccontextmanager

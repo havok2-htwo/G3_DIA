@@ -206,7 +206,9 @@ Expected JSON body:
   "diarization_model_id": "pyannote/speaker-diarization-community-1",
   "model_cache_path": ".\\models",
   "huggingface_token": "",
-  "gpu_device": "auto"
+  "gpu_device": "auto",
+  "preload_model_on_startup": true,
+  "skip_inactive_embeddings": true
 }
 ```
 
@@ -214,6 +216,22 @@ Expected JSON body:
 is omitted the saved device is kept. Changing the model, cache path, token or device
 reloads the pipeline immediately; the response then carries `model_loaded` and
 `model_status` with the load error, if any.
+
+`preload_model_on_startup` (default `true`) loads the pipeline in the background right
+after the server starts and runs a short warmup on the GPU, so the first request no
+longer pays ~13 s for model load and CUDA initialisation. Requests that arrive during
+the preload wait for it. Takes effect at the next start.
+
+`skip_inactive_embeddings` (default `true`) runs the speaker-embedding network only
+for (chunk, speaker) slots in which that speaker is active; inactive slots get the
+constant embedding the network returns for an all-zero mask. The result is
+byte-identical to the pyannote default path and the embedding phase (~80 % of the
+runtime) shrinks by the share of inactive slots: on this server 30 s clips went from
+210 to 100 ms, 5 min from 2.5 to 1.6 s, 47 min from 24.9 to 16.6 s and 69 min from 36.9
+to 20.2 s. A self-check falls back to the default path if the constant does not hold.
+Applies to the next request.
+
+Both fields are optional; when omitted the saved value is kept.
 
 ### `POST /api/admin/model/load`
 

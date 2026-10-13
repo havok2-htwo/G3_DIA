@@ -43,7 +43,14 @@ type AuthState = "loading" | "login" | "change" | "ready";
 
 const NUMBER_LOCALE = "de-DE";
 const POLL_MS = 1000;
-const emptySettings: AdminSettings = { diarization_model_id: "", model_cache_path: "", huggingface_token: "", gpu_device: "auto" };
+const emptySettings: AdminSettings = {
+  diarization_model_id: "",
+  model_cache_path: "",
+  huggingface_token: "",
+  gpu_device: "auto",
+  preload_model_on_startup: true,
+  skip_inactive_embeddings: true,
+};
 
 const MODEL_STATE_LABELS: Record<ModelStatus["state"], string> = {
   not_loaded: "Not loaded yet",
@@ -697,7 +704,21 @@ export default function DiaApp() {
             </label>
             <label className="full-width"><span>Model Cache Path</span><input value={settingsForm.model_cache_path} onChange={(event) => setSettingsForm((current) => ({ ...current, model_cache_path: event.target.value }))} /></label>
             <label className="full-width"><span>Hugging Face Token</span><input type="password" placeholder="hf_... (optional)" value={settingsForm.huggingface_token} onChange={(event) => setSettingsForm((current) => ({ ...current, huggingface_token: event.target.value }))} /></label>
-            <p className="field-note full-width">Save the token here if the server should be able to load the gated pyannote model again after restart. Changing the token, cache path or device reloads the model immediately.</p>
+            <label>
+              <span>Preload Model on Startup</span>
+              <select value={settingsForm.preload_model_on_startup ? "on" : "off"} onChange={(event) => setSettingsForm((current) => ({ ...current, preload_model_on_startup: event.target.value === "on" }))}>
+                <option value="on">On (first request is fast)</option>
+                <option value="off">Off (load on first request)</option>
+              </select>
+            </label>
+            <label>
+              <span>Skip Inactive Speaker Embeddings</span>
+              <select value={settingsForm.skip_inactive_embeddings ? "on" : "off"} onChange={(event) => setSettingsForm((current) => ({ ...current, skip_inactive_embeddings: event.target.value === "on" }))}>
+                <option value="on">On (same result, faster)</option>
+                <option value="off">Off (pyannote default path)</option>
+              </select>
+            </label>
+            <p className="field-note full-width">Save the token here if the server should be able to load the gated pyannote model again after restart. Changing the token, cache path or device reloads the model immediately. Preload applies from the next server start; the embedding shortcut applies to the next request.</p>
             <div className="form-actions full-width">
               <button type="submit" disabled={saveBusy || !formLoaded}>{saveBusy ? "Saving..." : formLoaded ? "Save Settings" : "Loading settings..."}</button>
             </div>

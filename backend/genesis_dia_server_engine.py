@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from dotenv import load_dotenv
 
+from . import genesis_dia_server_fast_embeddings as fast_embeddings
 from .genesis_dia_server_devices import DeviceUnavailableError, resolve_device
 from .genesis_dia_server_globals import (
     current_settings,
@@ -339,6 +340,71 @@ def load_diarization_model() -> bool:
         return False
 
 
+def skip_inactive_embeddings_enabled() -> bool:
+    with settings_lock:
+        return bool(current_settings.get("skip_inactive_embeddings", True))
+
+
+WARMUP_SECONDS = 20
+
+
+def _warmup_pipeline_unleased(pipeline: Any) -> None:
+    """Run every CUDA path once so the first real request does not pay for initialisation.
+
+    Low-level noise contains no speech, so the full pipeline call only warms the
+    segmentation model (pyannote exits before the embeddings).  The embedding
+    path is then exercised directly with a fake "one speaker active" segmentation
+    of the real frame layout, which also primes the inactive-speaker shortcut.
+    """
+
+    from pyannote.core import SlidingWindowFeature
+
+    noise = (np.random.default_rng(0).standard_normal(16000 * WARMUP_SECONDS) * 0.01).astype(np.float32)
+    audio = {"waveform": torch.from_numpy(noise).unsqueeze(0), "sample_rate": 16000, "uri": "warmup"}
+    pipeline(dict(audio))
+
+    segmentations = pipeline._segmentation(dict(audio))
+    fake = np.zeros_like(segmentations.data)
+    fake[:, :, 0] = 1.0
+    pipeline.get_embeddings(
+        dict(audio),
+        SlidingWindowFeature(fake, segmentations.sliding_window),
+        exclude_overlap=bool(getattr(pipeline, "embedding_exclude_overlap", False)),
+    )
+
+
+def preload_and_warmup_model() -> bool:
+    """Startup preload: load the pipeline and warm its CUDA kernels (lease held throughout).
+
+    Failures are reported and swallowed: requests fall back to the lazy load.
+    """
+
+    try:
+        with acquire_gpu_lease(enabled=_uses_gpu_lease()):
+            if not _load_diarization_model_unleased():
+                return False
+            pipeline = diarization_pipeline.get("pipeline")
+            device = diarization_pipeline.get("device")
+            if pipeline is None or getattr(device, "type", None) != "cuda":
+                return True  # CPU: nothing to warm, the load itself was the expensive part
+            started = datetime.datetime.now()
+            try:
+                _warmup_pipeline_unleased(pipeline)
+            except Exception as exc:
+                print(f"[WARNUNG-DIA] Warmup fehlgeschlagen (Modell bleibt geladen): {type(exc).__name__}: {exc}", file=sys.stderr)
+            finally:
+                # Keep the idle footprint at weights + context; the pool regrows on demand.
+                torch.cuda.empty_cache()
+            elapsed = (datetime.datetime.now() - started).total_seconds()
+            print(f"[INFO-DIA] Warmup abgeschlossen ({elapsed:.1f} s).", file=sys.stderr)
+            return True
+    except Exception as exc:
+        message = f"Modell-Preload abgebrochen: {type(exc).__name__}: {exc}"
+        print(f"[FEHLER-DIA] {message}", file=sys.stderr)
+        _set_model_status("error", error=message, token_source=get_token_source())
+        return False
+
+
 def _unload_pipeline_locked() -> None:
     if diarization_pipeline.get("pipeline") is None:
         return
@@ -415,6 +481,11 @@ def _load_diarization_model_unleased() -> bool:
             if pipeline is None:
                 raise RuntimeError(f"pyannote konnte keine Pipeline-Konfiguration fuer '{model_id}' laden.")
             pipeline.to(device)
+            try:
+                if not fast_embeddings.install(pipeline, skip_inactive_embeddings_enabled):
+                    print("[INFO-DIA] Pipeline ohne get_embeddings: Inaktive-Sprecher-Optimierung nicht aktiv.", file=sys.stderr)
+            except Exception as exc:  # an optimisation must never block the load
+                print(f"[WARNUNG-DIA] Inaktive-Sprecher-Optimierung nicht installiert: {type(exc).__name__}: {exc}", file=sys.stderr)
 
             diarization_pipeline["pipeline"] = pipeline
             diarization_pipeline["model_identifier"] = target_identifier
@@ -546,7 +617,23 @@ def _run_diarization_pipeline(
     # loader here avoids nested locks while the public load helper still
     # protects admin-triggered standalone model loads.
     with acquire_gpu_lease(enabled=_uses_gpu_lease()):
-        return _run_diarization_pipeline_unleased(audio_data_np, num_speakers, min_speakers, max_speakers)
+        try:
+            return _run_diarization_pipeline_unleased(audio_data_np, num_speakers, min_speakers, max_speakers)
+        finally:
+            _release_cuda_cache()
+
+
+def _release_cuda_cache() -> None:
+    """Hand cached activation blocks (~1.5-3 GB after a request) back to the shared GPU.
+
+    Costs ~20-30 ms on the next short request; the weights stay resident.
+    """
+
+    try:
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def _run_diarization_pipeline_unleased(

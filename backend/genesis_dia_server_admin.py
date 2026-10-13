@@ -43,7 +43,11 @@ class AdminSettingsPayload(BaseModel):
     huggingface_token: str
     # Optional so an older dashboard that does not know the field keeps the saved device.
     gpu_device: str | None = None
+    preload_model_on_startup: bool | None = None
+    skip_inactive_embeddings: bool | None = None
 
+
+OPTIONAL_SETTING_KEYS = ("gpu_device", "preload_model_on_startup", "skip_inactive_embeddings")
 
 MODEL_SETTING_KEYS = ("diarization_model_id", "model_cache_path", "huggingface_token", "gpu_device")
 
@@ -306,8 +310,9 @@ def create_admin_api(app: FastAPI) -> FastAPI:
     ):
         payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
         with settings_lock:
-            if payload_data.get("gpu_device") is None:
-                payload_data["gpu_device"] = current_settings.get("gpu_device", "auto")
+            for key in OPTIONAL_SETTING_KEYS:
+                if payload_data.get(key) is None and key in current_settings:
+                    payload_data[key] = current_settings[key]
         normalized = normalize_settings(payload_data)
         with settings_lock:
             previous_settings = current_settings.copy()

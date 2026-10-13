@@ -18,7 +18,24 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "model_cache_path": ".\\models",
     "huggingface_token": "",
     "gpu_device": "auto",
+    # Load + warm the pipeline right after start instead of inside the first request (~13 s).
+    "preload_model_on_startup": True,
+    # Run the embedding network only for speakers active in a chunk (identical output, ~1.5x faster).
+    "skip_inactive_embeddings": True,
 }
+
+
+def normalize_bool_setting(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def normalize_device_setting(value: Any) -> str:
@@ -44,6 +61,8 @@ def normalize_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     normalized["model_cache_path"] = str(source.get("model_cache_path", DEFAULT_SETTINGS["model_cache_path"])).strip()
     normalized["huggingface_token"] = str(source.get("huggingface_token", "")).strip()
     normalized["gpu_device"] = normalize_device_setting(source.get("gpu_device", DEFAULT_SETTINGS["gpu_device"]))
+    for key in ("preload_model_on_startup", "skip_inactive_embeddings"):
+        normalized[key] = normalize_bool_setting(source.get(key), DEFAULT_SETTINGS[key])
     return normalized
 
 

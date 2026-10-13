@@ -3,6 +3,8 @@ export type AdminSettings = {
   model_cache_path: string;
   huggingface_token: string;
   gpu_device: string;
+  preload_model_on_startup: boolean;
+  skip_inactive_embeddings: boolean;
 };
 
 export type AdminOption = {
