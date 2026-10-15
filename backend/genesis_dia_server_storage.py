@@ -22,7 +22,24 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "preload_model_on_startup": True,
     # Run the embedding network only for speakers active in a chunk (identical output, ~1.5x faster).
     "skip_inactive_embeddings": True,
+    # pyannote's config ships 32; 16 halves the embedding activations (~1 GB less peak VRAM on
+    # the shared GPU) while the ResNet34 is already ~90 % busy at 32, so throughput barely moves.
+    "embedding_batch_size": 16,
+    # Return the segmentation phase's cached blocks before the embedding phase allocates its own.
+    "release_between_phases": True,
 }
+
+EMBEDDING_BATCH_SIZE_RANGE = (1, 128)
+
+
+def normalize_int_setting(value: Any, default: int, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    return min(max(number, minimum), maximum)
 
 
 def normalize_bool_setting(value: Any, default: bool) -> bool:
@@ -61,8 +78,11 @@ def normalize_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     normalized["model_cache_path"] = str(source.get("model_cache_path", DEFAULT_SETTINGS["model_cache_path"])).strip()
     normalized["huggingface_token"] = str(source.get("huggingface_token", "")).strip()
     normalized["gpu_device"] = normalize_device_setting(source.get("gpu_device", DEFAULT_SETTINGS["gpu_device"]))
-    for key in ("preload_model_on_startup", "skip_inactive_embeddings"):
+    for key in ("preload_model_on_startup", "skip_inactive_embeddings", "release_between_phases"):
         normalized[key] = normalize_bool_setting(source.get(key), DEFAULT_SETTINGS[key])
+    normalized["embedding_batch_size"] = normalize_int_setting(
+        source.get("embedding_batch_size"), DEFAULT_SETTINGS["embedding_batch_size"], *EMBEDDING_BATCH_SIZE_RANGE
+    )
     return normalized
 
 

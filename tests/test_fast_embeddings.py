@@ -155,6 +155,70 @@ class PreloadSettingsTests(unittest.TestCase):
         self.assertFalse(parsed["preload_model_on_startup"])
         self.assertFalse(parsed["skip_inactive_embeddings"])
 
+    def test_embedding_batch_and_phase_release_settings(self) -> None:
+        self.assertEqual(DEFAULT_SETTINGS["embedding_batch_size"], 16)
+        self.assertTrue(DEFAULT_SETTINGS["release_between_phases"])
+        old = normalize_settings({"diarization_model_id": "x"})
+        self.assertEqual(old["embedding_batch_size"], 16)
+        self.assertTrue(old["release_between_phases"])
+        self.assertEqual(normalize_settings({"embedding_batch_size": "32"})["embedding_batch_size"], 32)
+        self.assertEqual(normalize_settings({"embedding_batch_size": 0})["embedding_batch_size"], 1)
+        self.assertEqual(normalize_settings({"embedding_batch_size": 999})["embedding_batch_size"], 128)
+        self.assertEqual(normalize_settings({"embedding_batch_size": "abc"})["embedding_batch_size"], 16)
+        self.assertEqual(normalize_settings({"embedding_batch_size": True})["embedding_batch_size"], 16)
+        self.assertFalse(normalize_settings({"release_between_phases": "off"})["release_between_phases"])
+
+
+class PhaseReleaseTests(unittest.TestCase):
+    def _run(self, release: bool | None, enabled: bool = True) -> int:
+        file, segmentations = make_inputs()
+        pipeline = make_pipeline(FakeEmbedding(), batch_size=4)
+        callback = None if release is None else (lambda: release)
+        fast.install(pipeline, lambda: enabled, release_between_phases=callback)
+        with mock.patch.object(fast.torch.cuda, "is_available", return_value=True), mock.patch.object(
+            fast.torch.cuda, "is_initialized", return_value=True
+        ), mock.patch.object(fast.torch.cuda, "empty_cache") as empty_cache:
+            pipeline.get_embeddings(file, segmentations, exclude_overlap=True)
+        return empty_cache.call_count
+
+    def test_releases_before_embeddings_only_when_enabled(self) -> None:
+        self.assertEqual(self._run(True), 1)
+        self.assertEqual(self._run(True, enabled=False), 1)  # also before pyannote's own path
+        self.assertEqual(self._run(False), 0)
+        self.assertEqual(self._run(None), 0)
+
+    def test_reinstall_updates_release_callback(self) -> None:
+        pipeline = make_pipeline(FakeEmbedding())
+        fast.install(pipeline, lambda: True)
+        fast.install(pipeline, lambda: True, release_between_phases=lambda: True)
+        self.assertTrue(getattr(pipeline, fast._INSTALLED_ATTR)["release_between_phases"]())
+
+
+class EmbeddingBatchSizeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._settings_backup = dict(current_settings)
+        self._pipeline_backup = dict(diarization_pipeline)
+
+    def tearDown(self) -> None:
+        current_settings.clear()
+        current_settings.update(self._settings_backup)
+        diarization_pipeline.clear()
+        diarization_pipeline.update(self._pipeline_backup)
+
+    def test_configured_batch_size_is_applied_to_each_run(self) -> None:
+        pipeline = mock.Mock()
+        pipeline.embedding_batch_size = 32
+        pipeline.return_value = "result"
+        diarization_pipeline.update({"pipeline": pipeline})
+        current_settings.clear()
+        current_settings.update(normalize_settings({"embedding_batch_size": 16}))
+        with mock.patch.object(engine, "_load_diarization_model_unleased", return_value=True):
+            self.assertEqual(engine._run_diarization_pipeline_unleased(np.zeros(16000, dtype=np.float32)), "result")
+            self.assertEqual(pipeline.embedding_batch_size, 16)
+            current_settings["embedding_batch_size"] = 8
+            engine._run_diarization_pipeline_unleased(np.zeros(16000, dtype=np.float32))
+            self.assertEqual(pipeline.embedding_batch_size, 8)
+
 
 class PreloadTests(unittest.TestCase):
     def setUp(self) -> None:

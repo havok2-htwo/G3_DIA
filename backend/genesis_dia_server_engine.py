@@ -24,6 +24,7 @@ from .genesis_dia_server_globals import (
     task_status_lock,
 )
 from .genesis_dia_server_gpu_lease import acquire_gpu_lease
+from .genesis_dia_server_storage import normalize_settings
 
 HUGGING_FACE_TOKEN = None
 
@@ -345,6 +346,26 @@ def skip_inactive_embeddings_enabled() -> bool:
         return bool(current_settings.get("skip_inactive_embeddings", True))
 
 
+def release_between_phases_enabled() -> bool:
+    with settings_lock:
+        return bool(current_settings.get("release_between_phases", True))
+
+
+def configured_embedding_batch_size() -> int:
+    with settings_lock:
+        return normalize_settings(current_settings)["embedding_batch_size"]
+
+
+def _apply_embedding_batch_size(pipeline: Any) -> None:
+    """Override the snapshot config's embedding batch (32) with the admin setting.
+
+    Read before every run so a change applies to the next request without a reload.
+    """
+
+    if hasattr(pipeline, "embedding_batch_size"):
+        pipeline.embedding_batch_size = configured_embedding_batch_size()
+
+
 WARMUP_SECONDS = 20
 
 
@@ -481,8 +502,11 @@ def _load_diarization_model_unleased() -> bool:
             if pipeline is None:
                 raise RuntimeError(f"pyannote konnte keine Pipeline-Konfiguration fuer '{model_id}' laden.")
             pipeline.to(device)
+            _apply_embedding_batch_size(pipeline)
             try:
-                if not fast_embeddings.install(pipeline, skip_inactive_embeddings_enabled):
+                if not fast_embeddings.install(
+                    pipeline, skip_inactive_embeddings_enabled, release_between_phases=release_between_phases_enabled
+                ):
                     print("[INFO-DIA] Pipeline ohne get_embeddings: Inaktive-Sprecher-Optimierung nicht aktiv.", file=sys.stderr)
             except Exception as exc:  # an optimisation must never block the load
                 print(f"[WARNUNG-DIA] Inaktive-Sprecher-Optimierung nicht installiert: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -670,6 +694,7 @@ def _run_diarization_pipeline_unleased(
                 current_task_status["progress"] = round(progress_percent, 2)
                 current_task_status["details"] = f"Step: {step_name} ({safe_comp}/{safe_total})"
 
+    _apply_embedding_batch_size(pipeline)
     waveform = torch.from_numpy(audio_data_np).unsqueeze(0)
     audio_dict = {"waveform": waveform, "sample_rate": 16000}
 

@@ -5,6 +5,8 @@ export type AdminSettings = {
   gpu_device: string;
   preload_model_on_startup: boolean;
   skip_inactive_embeddings: boolean;
+  embedding_batch_size: number;
+  release_between_phases: boolean;
 };
 
 export type AdminOption = {

@@ -92,11 +92,32 @@ def _get_inactive_embedding(pipeline: Any, num_samples: int, num_frames: int) ->
         return state["constants"][key]
 
 
+def release_segmentation_cache(state: dict) -> None:
+    """Hand the segmentation phase's cached CUDA blocks back before the embedding phase.
+
+    pyannote calls ``get_embeddings`` right after the segmentation finished. Its
+    activations are freed by then but stay reserved in the caching allocator, so
+    the embedding phase grew the pool on top of them (+0.7 GB segmentation, +1.25 GB
+    embedding). Releasing here lets the request peak at the larger phase alone;
+    the cost is one ``empty_cache`` (a few ms).
+    """
+
+    release = state.get("release_between_phases")
+    if release is None or not release():
+        return
+    try:
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def fast_get_embeddings(self, file, binary_segmentations, exclude_overlap: bool = False, hook: Optional[Callable] = None):
     """Drop-in for ``SpeakerDiarization.get_embeddings`` (pyannote.audio 4.0)."""
 
     state = getattr(self, _INSTALLED_ATTR)
     original = state["original"]
+    release_segmentation_cache(state)
     if self.training or not state["enabled"]():
         return original(file, binary_segmentations, exclude_overlap=exclude_overlap, hook=hook)
 
@@ -154,16 +175,22 @@ def fast_get_embeddings(self, file, binary_segmentations, exclude_overlap: bool 
     return embeddings.reshape(num_chunks, num_speakers, -1)
 
 
-def install(pipeline: Any, enabled: Callable[[], bool]) -> bool:
+def install(
+    pipeline: Any,
+    enabled: Callable[[], bool],
+    release_between_phases: Optional[Callable[[], bool]] = None,
+) -> bool:
     """Route ``pipeline.get_embeddings`` through :func:`fast_get_embeddings`.
 
-    ``enabled`` is read on every call so the admin setting applies without a reload.
-    Returns False when the pipeline does not look like pyannote's SpeakerDiarization.
+    ``enabled`` and ``release_between_phases`` are read on every call so the admin
+    settings apply without a reload. Returns False when the pipeline does not look
+    like pyannote's SpeakerDiarization.
     """
 
     state = getattr(pipeline, "__dict__", {}).get(_INSTALLED_ATTR)
     if isinstance(state, dict):
         state["enabled"] = enabled
+        state["release_between_phases"] = release_between_phases
         return True
     required = ("get_embeddings", "_embedding", "_audio", "embedding_batch_size", "training")
     if not all(hasattr(pipeline, name) for name in required):
@@ -171,7 +198,13 @@ def install(pipeline: Any, enabled: Callable[[], bool]) -> bool:
     setattr(
         pipeline,
         _INSTALLED_ATTR,
-        {"original": pipeline.get_embeddings, "enabled": enabled, "constants": {}, "stats": None},
+        {
+            "original": pipeline.get_embeddings,
+            "enabled": enabled,
+            "release_between_phases": release_between_phases,
+            "constants": {},
+            "stats": None,
+        },
     )
     pipeline.get_embeddings = types.MethodType(fast_get_embeddings, pipeline)
     return True

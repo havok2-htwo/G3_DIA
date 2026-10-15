@@ -208,7 +208,9 @@ Expected JSON body:
   "huggingface_token": "",
   "gpu_device": "auto",
   "preload_model_on_startup": true,
-  "skip_inactive_embeddings": true
+  "skip_inactive_embeddings": true,
+  "embedding_batch_size": 16,
+  "release_between_phases": true
 }
 ```
 
@@ -232,6 +234,18 @@ The embedding phase (~80 % of the runtime) shrinks by the share of inactive slot
 210 to 100 ms, 5 min from 2.5 to 1.6 s, 47 min from 24.9 to 16.6 s and 69 min from 36.9
 to 20.2 s. A self-check falls back to the default path if the constant does not hold.
 Applies to the next request.
+
+`embedding_batch_size` (default `16`, range 1-128) overrides the speaker-embedding batch
+size from the pyannote snapshot config (32). The peak VRAM of a request depends on this
+batch, not on the audio length; 32 measured +1.96 GB over idle on the RTX 4090, 16 is
+expected to need about 1 GB less while the ResNet34 is already ~90 % busy at 32. Applies
+to the next request.
+
+`release_between_phases` (default `true`) returns the segmentation phase's cached CUDA
+blocks (`empty_cache`) right before the embedding phase starts, so the request no longer
+holds both phases' blocks at once. Costs one `empty_cache` per request. Applies to the
+next request. The idle footprint is unaffected either way: DIA always releases the
+activation cache after each request.
 
 Both fields are optional; when omitted the saved value is kept.
 

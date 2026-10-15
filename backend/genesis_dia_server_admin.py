@@ -45,9 +45,17 @@ class AdminSettingsPayload(BaseModel):
     gpu_device: str | None = None
     preload_model_on_startup: bool | None = None
     skip_inactive_embeddings: bool | None = None
+    embedding_batch_size: int | None = None
+    release_between_phases: bool | None = None
 
 
-OPTIONAL_SETTING_KEYS = ("gpu_device", "preload_model_on_startup", "skip_inactive_embeddings")
+OPTIONAL_SETTING_KEYS = (
+    "gpu_device",
+    "preload_model_on_startup",
+    "skip_inactive_embeddings",
+    "embedding_batch_size",
+    "release_between_phases",
+)
 
 MODEL_SETTING_KEYS = ("diarization_model_id", "model_cache_path", "huggingface_token", "gpu_device")
 
