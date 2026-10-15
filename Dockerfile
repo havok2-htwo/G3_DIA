@@ -23,6 +23,9 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     HF_HOME=/app/models/.hf
+# numpy/scipy OpenBLAS starts one thread per core at import, each with a buffer it never
+# touches; 4 threads are plenty for the CPU clustering step here.
+ENV OPENBLAS_NUM_THREADS=4
 
 # System libraries:
 #   ffmpeg         -> decode mp3/m4a/video; also brings the libav* libs pyannote's torchcodec needs

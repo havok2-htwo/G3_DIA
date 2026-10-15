@@ -147,6 +147,9 @@ if errorlevel 1 (
 echo Nutze lokale venv unter "%CD%\venv" ...
 echo Starte den GENESIS DIA Server...
 title G3 DIA Server
+REM numpy/scipy OpenBLAS starts one thread per core at import, each committing a 32 MiB buffer
+REM it never touches (~1.5 GB commit). 4 threads are plenty; measured runtime is unchanged.
+set "OPENBLAS_NUM_THREADS=4"
 call "%VENV_PYTHON%" -m backend.genesis_dia_server
 
 echo.
