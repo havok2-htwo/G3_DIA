@@ -249,6 +249,68 @@ activation cache after each request.
 
 Both fields are optional; when omitted the saved value is kept.
 
+### `GET /api/admin/settings/presets`
+
+Lists the settings presets: the built-in GPU tiers first, in tier order, then the saved
+presets by name. Loading a preset in the dashboard only fills the settings form;
+`PUT /api/admin/settings` applies it, so a preset never bypasses validation.
+
+```json
+{
+  "presets": [
+    {
+      "name": "8+24 VRAM",
+      "built_in": true,
+      "description": "3090 + 2070S box, DIA alone on the 2070S (8 GB). ...",
+      "target_vram_gb": 8,
+      "created_at": null,
+      "note": null,
+      "values": {
+        "embedding_batch_size": 16,
+        "release_between_phases": true,
+        "skip_inactive_embeddings": true,
+        "preload_model_on_startup": true,
+        "gpu_device": "cuda:1"
+      }
+    }
+  ]
+}
+```
+
+Built-in tiers (names identical across the G3 services; the number in front names the
+card DIA runs on):
+
+- `32GB VRAM`: RTX 5090, all G3 services on one card (whole-card peak <= 30 GB).
+- `24GB VRAM`: RTX 4090, all G3 services on one card (whole-card peak <= 23 GB).
+- `8+24 VRAM`: RTX 3090 (24 GB) + RTX 2070S (8 GB), DIA alone on the 8 GB card. There is
+  no `24+8 VRAM` tier for DIA.
+
+Single-card tiers never set `gpu_device`. `8+24 VRAM` sets it to the CUDA device whose
+total memory is within 2 GiB of 8 GB, wherever that card sits; if no card matches,
+`gpu_device` is left out and `note` explains why. The tier values are currently the
+service defaults; measured values replace them later.
+
+A preset holds only `gpu_device`, `embedding_batch_size`, `release_between_phases`,
+`skip_inactive_embeddings` and `preload_model_on_startup`. The model id, the cache path
+and the Hugging Face token are never stored.
+
+### `PUT /api/admin/settings/presets/{name}`
+
+Saves (or overwrites) a user preset in `logs/genesis_dia_presets.json`. Body:
+
+```json
+{ "values": { "gpu_device": "cuda:0", "embedding_batch_size": 16 } }
+```
+
+Keys outside the preset keys are dropped and the rest is normalised like a saved setting
+(e.g. `embedding_batch_size` clamped to 1-128). Whitespace in the name is collapsed; the
+name has at most 64 characters. Returns `{"ok": true, "preset": {...}}`. `400` for a
+built-in name, an empty or too long name, or no preset keys at all.
+
+### `DELETE /api/admin/settings/presets/{name}`
+
+Deletes a saved preset. `400` for a built-in name, `404` if no such preset exists.
+
 ### `POST /api/admin/model/load`
 
 Loads the pipeline with the saved settings (no-op when it is already loaded) and

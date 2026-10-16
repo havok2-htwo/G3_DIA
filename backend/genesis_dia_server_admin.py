@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 import torch
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .genesis_dia_server_audio import get_audio_duration_seconds, load_audio_file
 from .genesis_dia_server_auth import (
@@ -34,6 +34,7 @@ from .genesis_dia_server_globals import (
     task_runtime_state,
     task_status_lock,
 )
+from .genesis_dia_server_presets import delete_user_preset, resolve_presets, save_user_preset
 from .genesis_dia_server_storage import normalize_settings, save_settings
 
 
@@ -58,6 +59,11 @@ OPTIONAL_SETTING_KEYS = (
 )
 
 MODEL_SETTING_KEYS = ("diarization_model_id", "model_cache_path", "huggingface_token", "gpu_device")
+
+
+class PresetPayload(BaseModel):
+    # Settings values; anything outside presets.PRESET_KEYS is dropped, the rest normalised like a saved setting.
+    values: Dict[str, Any] = Field(default_factory=dict)
 
 
 class LoginPayload(BaseModel):
@@ -346,6 +352,29 @@ def create_admin_api(app: FastAPI) -> FastAPI:
             "loaded_model_identifier": _loaded_model_identifier(),
             "model_status": _model_status_payload(),
         }
+
+    # --- Settings presets (built-in GPU tiers + saved ones; loading fills the form, Save applies) ---
+    @app.get("/api/admin/settings/presets")
+    async def admin_list_presets(_: dict[str, str] = Depends(require_admin)):
+        return {"presets": await asyncio.to_thread(resolve_presets)}
+
+    @app.put("/api/admin/settings/presets/{name}")
+    async def admin_save_preset(name: str, payload: PresetPayload, _: dict[str, str] = Depends(require_admin)):
+        try:
+            preset = await asyncio.to_thread(save_user_preset, name, payload.values)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "preset": preset}
+
+    @app.delete("/api/admin/settings/presets/{name}")
+    async def admin_delete_preset(name: str, _: dict[str, str] = Depends(require_admin)):
+        try:
+            deleted = await asyncio.to_thread(delete_user_preset, name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"No saved preset '{name[:100]}'.")
+        return {"ok": True}
 
     @app.get("/api/admin/stats")
     async def admin_stats(_: dict[str, str] = Depends(require_admin)):

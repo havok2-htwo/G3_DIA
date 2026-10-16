@@ -98,6 +98,9 @@ Protected routes:
 - `DELETE /api/admin/api-keys/{key_id}`
 - `GET /api/admin/settings`
 - `PUT /api/admin/settings`
+- `GET /api/admin/settings/presets`
+- `PUT /api/admin/settings/presets/{name}`
+- `DELETE /api/admin/settings/presets/{name}`
 - `GET /api/admin/stats`
 - `GET /api/admin/task`
 - `POST /api/admin/benchmark`
@@ -108,6 +111,7 @@ The dashboard offers:
 - current task progress from the pyannote progress hook
 - worker status such as pending requests and last error
 - runtime settings for cache path and Hugging Face token
+- settings presets: built-in GPU tiers `32GB VRAM`, `24GB VRAM`, `8+24 VRAM` plus saved presets
 - benchmark results including runtime, RTF, speaker count, and sample output
 - latest request history
 
@@ -131,6 +135,7 @@ Recognized environment variables:
 - `HF_TOKEN`
 - `HUGGING_FACE_HUB_TOKEN`
 - `GENESIS_GPU_LEASE_PATH` (optional shared file-lock path for CUDA serialization)
+- `CUDA_DEVICE_ORDER` (defaults to `PCI_BUS_ID`, so `cuda:N` is the card `nvidia-smi` shows as GPU N)
 
 ## Logs and Persistent Data
 
@@ -138,6 +143,7 @@ Runtime files are stored under [`logs`](x:/dev/G3_DIA/logs):
 
 - `logs/genesis_dia_settings.json`
 - `logs/genesis_dia_secrets.json`
+- `logs/genesis_dia_presets.json` (saved settings presets)
 - `logs/diarization_log.jsonl`
 
 ## Startup

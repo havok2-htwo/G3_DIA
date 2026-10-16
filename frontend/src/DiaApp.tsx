@@ -7,20 +7,24 @@ import {
   BenchmarkResponse,
   CreatedApiKey,
   ModelStatus,
+  SettingsPreset,
   SettingsResponse,
   StatsResponse,
   TaskResponse,
   changePassword,
   createApiKey,
   deleteApiKey,
+  deletePreset,
   getSettings,
   getStats,
   getTask,
   listApiKeys,
+  listPresets,
   loadModel,
   login,
   logout,
   runBenchmark,
+  savePreset,
   saveSettings,
   whoami,
 } from "./api";
@@ -154,6 +158,10 @@ export default function DiaApp() {
   const [benchmarkRepeatCount, setBenchmarkRepeatCount] = useState(1);
   const [benchmarkResult, setBenchmarkResult] = useState<BenchmarkResponse | null>(null);
   const [benchmarkMessage, setBenchmarkMessage] = useState("");
+  const [presets, setPresets] = useState<SettingsPreset[]>([]);
+  const [presetName, setPresetName] = useState("");
+  const [presetBusy, setPresetBusy] = useState(false);
+  const selectedPreset = presets.find((preset) => preset.name === presetName.trim());
 
   const isReady = authState === "ready";
 
@@ -187,6 +195,8 @@ export default function DiaApp() {
       setErrorMessage("");
       setBenchmarkResult(null);
       setBenchmarkMessage("");
+      setPresets([]);
+      setPresetName("");
     });
   };
 
@@ -246,6 +256,19 @@ export default function DiaApp() {
       cancelled = true;
     };
   }, []);
+
+  const reloadPresets = async () => {
+    try {
+      setPresets((await listPresets()).presets);
+    } catch (error) {
+      handleApiError(error, "Presets could not be loaded.");
+    }
+  };
+
+  useEffect(() => {
+    if (!isReady) return;
+    void reloadPresets();
+  }, [authState]);
 
   useEffect(() => {
     if (!isReady) return;
@@ -366,6 +389,52 @@ export default function DiaApp() {
       handleApiError(error, "Saving settings failed.");
     } finally {
       setSaveBusy(false);
+    }
+  };
+
+  // Loading only fills the form; Save Settings applies it through the normal validated save.
+  const handleLoadPreset = () => {
+    if (!selectedPreset) return;
+    setSettingsForm((current) => ({ ...current, ...selectedPreset.values }));
+    setErrorMessage("");
+    setMessage(
+      `Preset "${selectedPreset.name}" loaded into the form; review it and click Save Settings to apply.`
+        + (selectedPreset.note ? ` ${selectedPreset.note}` : ""),
+    );
+  };
+
+  const handleSavePreset = async () => {
+    const name = presetName.trim();
+    if (!name) return;
+    setPresetBusy(true);
+    setMessage("");
+    setErrorMessage("");
+    try {
+      const response = await savePreset(name, settingsForm);
+      setPresetName(response.preset.name);
+      await reloadPresets();
+      setMessage(`Preset "${response.preset.name}" saved from the current form.`);
+    } catch (error) {
+      handleApiError(error, "The preset could not be saved.");
+    } finally {
+      setPresetBusy(false);
+    }
+  };
+
+  const handleDeletePreset = async () => {
+    if (!selectedPreset || selectedPreset.built_in) return;
+    setPresetBusy(true);
+    setMessage("");
+    setErrorMessage("");
+    try {
+      await deletePreset(selectedPreset.name);
+      setPresetName("");
+      await reloadPresets();
+      setMessage(`Preset "${selectedPreset.name}" deleted.`);
+    } catch (error) {
+      handleApiError(error, "The preset could not be deleted.");
+    } finally {
+      setPresetBusy(false);
     }
   };
 
@@ -736,6 +805,34 @@ export default function DiaApp() {
               <button type="submit" disabled={saveBusy || !formLoaded}>{saveBusy ? "Saving..." : formLoaded ? "Save Settings" : "Loading settings..."}</button>
             </div>
           </form>
+
+          <div className="panel-divider" />
+          <div className="section-heading benchmark-heading">
+            <div><span className="eyebrow">Presets</span><h2>GPU Tiers and Saved Presets</h2></div>
+          </div>
+          <div className="settings-form">
+            <label>
+              <span>Preset</span>
+              <select value={selectedPreset ? selectedPreset.name : ""} onChange={(event) => setPresetName(event.target.value)}>
+                <option value="">Choose a preset...</option>
+                {presets.map((preset) => (
+                  <option key={preset.name} value={preset.name}>{preset.built_in ? `${preset.name} (built-in)` : preset.name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Preset Name</span>
+              <input value={presetName} maxLength={64} placeholder="name for Save as preset" onChange={(event) => setPresetName(event.target.value)} />
+            </label>
+            {selectedPreset?.description && <p className="field-note full-width">{selectedPreset.description}</p>}
+            {selectedPreset?.note && <p className="message error full-width">{selectedPreset.note}</p>}
+            <p className="field-note full-width">Load into form only fills the settings above; Save Settings applies them. A preset holds the device, embedding batch size, phase release, embedding shortcut and preload. The model, cache path and Hugging Face token are never stored in a preset. Built-in tiers cannot be overwritten or deleted; "8+24 VRAM" picks the 8 GB card of a 3090 + 2070S box.</p>
+            <div className="form-actions full-width">
+              <button type="button" className="secondary-button" onClick={handleLoadPreset} disabled={!selectedPreset || presetBusy || saveBusy || !formLoaded}>Load into form</button>
+              <button type="button" className="secondary-button" onClick={() => void handleSavePreset()} disabled={!presetName.trim() || selectedPreset?.built_in === true || presetBusy || !formLoaded}>Save as preset</button>
+              <button type="button" className="ghost-button danger-button" onClick={() => void handleDeletePreset()} disabled={!selectedPreset || selectedPreset.built_in || presetBusy}>Delete preset</button>
+            </div>
+          </div>
         </section>
 
         <section className="panel stack">

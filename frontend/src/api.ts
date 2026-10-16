@@ -208,6 +208,35 @@ export async function saveSettings(settings: AdminSettings) {
   );
 }
 
+// Built-in GPU tiers ("32GB VRAM", "24GB VRAM", "8+24 VRAM") plus saved presets. Loading one fills the settings
+// form; Save Settings applies it through the normal PUT /api/admin/settings.
+export type SettingsPreset = {
+  name: string;
+  built_in: boolean;
+  description: string;
+  target_vram_gb?: number | null;
+  note?: string | null;
+  created_at?: string | null;
+  values: Partial<AdminSettings>;
+};
+
+export async function listPresets() {
+  return requestJson<{ presets: SettingsPreset[] }>("/api/admin/settings/presets", { method: "GET" });
+}
+
+export async function savePreset(name: string, settings: AdminSettings) {
+  // The server keeps only its preset keys; the token and the cache path are not even sent.
+  const { huggingface_token: _token, model_cache_path: _cachePath, ...values } = settings;
+  return requestJson<{ ok: boolean; preset: SettingsPreset }>(`/api/admin/settings/presets/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    body: JSON.stringify({ values }),
+  });
+}
+
+export async function deletePreset(name: string) {
+  return requestJson<{ ok: boolean }>(`/api/admin/settings/presets/${encodeURIComponent(name)}`, { method: "DELETE" });
+}
+
 export async function loadModel() {
   return requestJson<ModelLoadResponse>("/api/admin/model/load", { method: "POST" });
 }

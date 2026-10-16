@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .genesis_dia_server_globals import (
@@ -84,6 +86,18 @@ def normalize_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         source.get("embedding_batch_size"), DEFAULT_SETTINGS["embedding_batch_size"], *EMBEDDING_BATCH_SIZE_RANGE
     )
     return normalized
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write via a temp file in the same directory + os.replace, so a crash never leaves a half-written file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp_path.write_text(text, encoding="utf-8")
+        os.replace(tmp_path, path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def load_settings() -> Dict[str, Any]:
