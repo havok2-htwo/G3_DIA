@@ -25,10 +25,13 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import genesis_dia_server_storage as storage
 from .genesis_dia_server_globals import LOGS_DIR
 from .genesis_dia_server_storage import atomic_write_text, normalize_settings
 
 PRESETS_FILE = LOGS_DIR / "genesis_dia_presets.json"
+# A fresh install (no saved settings yet) starts with this tier; the same in every G3 service.
+FIRST_START_PRESET = "24GB VRAM"
 PRESET_NAME_MAX_LENGTH = 64
 
 # Keys a preset may set: device and VRAM behaviour. The model id, the model cache path and the Hugging Face token
@@ -235,12 +238,23 @@ def delete_user_preset(name: str) -> bool:
     return True
 
 
+def load_settings_or_first_start_preset() -> Tuple[Dict[str, Any], bool]:
+    """The saved settings; without a settings file (first start) the defaults, the entrypoint seed (container paths)
+    and FIRST_START_PRESET on top, saved so the dashboard shows what runs. Returns (settings, applied)."""
+    if storage.SETTINGS_FILE.exists():
+        return storage.load_settings(), False
+    values = dict(BUILTIN_PRESETS[FIRST_START_PRESET]["values"])
+    return storage.save_settings({**storage.DEFAULT_SETTINGS, **storage.load_settings_seed(), **values}), True
+
+
 __all__ = [
     "BUILTIN_PRESETS",
+    "FIRST_START_PRESET",
     "PRESETS_FILE",
     "PRESET_KEYS",
     "delete_user_preset",
     "detect_cuda_memory_mib",
+    "load_settings_or_first_start_preset",
     "preset_values",
     "resolve_presets",
     "save_user_preset",

@@ -58,8 +58,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY backend/ ./backend/
 COPY --from=frontend /build/frontend/dist ./frontend/dist
 
-# Entrypoint seeds a Linux-correct settings file on first boot (built-in default cache
-# path is the Windows literal ".\\models").
+# Entrypoint seeds a Linux-correct cache path on first boot (built-in default cache path
+# is the Windows literal ".\\models"); the server applies it with the first-start tier.
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

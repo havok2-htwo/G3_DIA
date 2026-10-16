@@ -290,6 +290,10 @@ card DIA runs on):
 - `8+24 VRAM`: RTX 3090 (24 GB) + RTX 2070S (8 GB), DIA alone on the 8 GB card. There is
   no `24+8 VRAM` tier for DIA.
 
+A fresh install (no `logs/genesis_dia_settings.json` yet) starts with the defaults plus
+`24GB VRAM` and saves them; the Docker entrypoint's seed (`model_cache_path` `/app/models`)
+is kept. Existing settings are untouched, and `8+24 VRAM` is never applied automatically.
+
 Single-card tiers never set `gpu_device`. `8+24 VRAM` sets it to the CUDA device whose
 total memory is within 2 GiB of 8 GB, wherever that card sits; if no card matches,
 `gpu_device` is left out and `note` explains why.

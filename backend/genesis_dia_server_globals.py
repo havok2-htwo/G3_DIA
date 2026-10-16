@@ -8,6 +8,8 @@ from typing import Any, Dict
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
 SETTINGS_FILE = LOGS_DIR / "genesis_dia_settings.json"
+# Written by docker/entrypoint.sh before the first start (container paths); read only while no settings file exists.
+SETTINGS_SEED_FILE = LOGS_DIR / "genesis_dia_settings_seed.json"
 SECRETS_FILE = LOGS_DIR / "genesis_dia_secrets.json"
 LOG_FILE = LOGS_DIR / "diarization_log.jsonl"
 

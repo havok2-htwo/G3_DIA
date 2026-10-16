@@ -277,7 +277,9 @@ class PreloadTests(unittest.TestCase):
         async def scenario(enabled: bool):
             app = FastAPI()
             settings = normalize_settings({"preload_model_on_startup": enabled})
-            with mock.patch.object(server, "load_settings", return_value=settings), mock.patch.object(
+            with mock.patch.object(
+                server, "load_settings_or_first_start_preset", return_value=(settings, False)
+            ), mock.patch.object(
                 server, "preload_and_warmup_model", return_value=True
             ) as preload, mock.patch("builtins.print"):
                 await server.startup_server(app)

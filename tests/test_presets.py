@@ -3,6 +3,7 @@
 No GPU: the detected cards are faked, and every test writes its presets file into a temporary directory.
 """
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 
 from backend import genesis_dia_server_admin as admin
 from backend import genesis_dia_server_presets as presets
+from backend import genesis_dia_server_storage as storage
 from backend.genesis_dia_server_storage import DEFAULT_SETTINGS, normalize_settings
 
 TIER_NAMES = ["32GB VRAM", "24GB VRAM", "8+24 VRAM"]
@@ -222,6 +224,73 @@ class AdminPresetRouteTests(PresetTestCase):
         with self.assertRaises(HTTPException) as raised:
             self.call("DELETE", path, "lab")
         self.assertEqual(raised.exception.status_code, 404)
+
+
+class FirstStartTests(unittest.TestCase):
+    """Settings, seed and logs dir all point into a temp dir, so the real logs/ settings file is never touched."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        logs_dir = Path(self._tmp.name)
+        for name, value in (
+            ("LOGS_DIR", logs_dir),
+            ("SETTINGS_FILE", logs_dir / "genesis_dia_settings.json"),
+            ("SETTINGS_SEED_FILE", logs_dir / "genesis_dia_settings_seed.json"),
+        ):
+            patcher = mock.patch.object(storage, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        print_patcher = mock.patch("builtins.print")
+        print_patcher.start()
+        self.addCleanup(print_patcher.stop)
+
+    def test_first_start_preset_is_the_24gb_single_card_tier(self) -> None:
+        self.assertEqual(presets.FIRST_START_PRESET, "24GB VRAM")
+        self.assertIsNone(presets.BUILTIN_PRESETS[presets.FIRST_START_PRESET]["target_vram_gb"])
+        self.assertNotIn("gpu_device", presets.BUILTIN_PRESETS[presets.FIRST_START_PRESET]["values"])
+
+    def test_first_start_applies_the_24gb_tier_and_saves_it(self) -> None:
+        self.assertFalse(storage.SETTINGS_FILE.exists())
+        settings, applied = presets.load_settings_or_first_start_preset()
+        self.assertTrue(applied)
+        for key, value in presets.BUILTIN_PRESETS["24GB VRAM"]["values"].items():
+            self.assertEqual(settings[key], value, key)
+        self.assertEqual(settings["gpu_device"], DEFAULT_SETTINGS["gpu_device"])
+        self.assertEqual(settings["model_cache_path"], DEFAULT_SETTINGS["model_cache_path"])
+        self.assertTrue(storage.SETTINGS_FILE.exists())
+        self.assertEqual(storage.load_settings(), settings)
+
+    def test_first_start_keeps_the_entrypoint_seed(self) -> None:
+        # docker/entrypoint.sh writes only the seed; the tier still applies and the container cache path survives.
+        storage.SETTINGS_SEED_FILE.write_text('{"model_cache_path": "/app/models"}', encoding="utf-8")
+        settings, applied = presets.load_settings_or_first_start_preset()
+        self.assertTrue(applied)
+        self.assertEqual(settings["model_cache_path"], "/app/models")
+        for key, value in presets.BUILTIN_PRESETS["24GB VRAM"]["values"].items():
+            self.assertEqual(settings[key], value, key)
+        self.assertEqual(json.loads(storage.SETTINGS_FILE.read_text(encoding="utf-8"))["model_cache_path"], "/app/models")
+
+    def test_corrupt_seed_is_ignored(self) -> None:
+        storage.SETTINGS_SEED_FILE.write_text("{not json", encoding="utf-8")
+        settings, applied = presets.load_settings_or_first_start_preset()
+        self.assertTrue(applied)
+        self.assertEqual(settings["model_cache_path"], DEFAULT_SETTINGS["model_cache_path"])
+
+    def test_saved_settings_are_kept_on_later_starts(self) -> None:
+        storage.save_settings({**DEFAULT_SETTINGS, "embedding_batch_size": 8, "release_between_phases": True})
+        storage.SETTINGS_SEED_FILE.write_text('{"model_cache_path": "/app/models"}', encoding="utf-8")
+        settings, applied = presets.load_settings_or_first_start_preset()
+        self.assertFalse(applied)
+        self.assertEqual((settings["embedding_batch_size"], settings["release_between_phases"]), (8, True))
+        self.assertEqual(settings["model_cache_path"], DEFAULT_SETTINGS["model_cache_path"])
+
+    def test_entrypoint_seeds_only_the_seed_file(self) -> None:
+        # A seeded settings file would hide the first start from the server, so the tier would never apply.
+        script = (Path(__file__).resolve().parent.parent / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertIn('cat > "${SEED_FILE}"', script)
+        self.assertNotIn('cat > "${SETTINGS_FILE}"', script)
+        self.assertIn(storage.SETTINGS_SEED_FILE.name, script)
 
 
 if __name__ == "__main__":

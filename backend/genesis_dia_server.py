@@ -15,7 +15,7 @@ from .genesis_dia_server_api import create_api
 from .genesis_dia_server_engine import preload_and_warmup_model
 from .genesis_dia_server_gpu_lease import run_blocking_gpu_phase
 from .genesis_dia_server_globals import current_settings
-from .genesis_dia_server_storage import load_settings
+from .genesis_dia_server_presets import FIRST_START_PRESET, load_settings_or_first_start_preset
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend" / "dist"
@@ -24,8 +24,14 @@ FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend" / "dist"
 async def startup_server(app: FastAPI):
     print("--- GENESIS DIA Server wird gestartet (FastAPI + React + pyannote diarization) ---", file=sys.stderr)
 
+    loaded, first_start = load_settings_or_first_start_preset()
     current_settings.clear()
-    current_settings.update(load_settings())
+    current_settings.update(loaded)
+    if first_start:
+        print(
+            f"[INFO-DIA] Erster Start: keine gespeicherten Einstellungen, Preset '{FIRST_START_PRESET}' angewendet.",
+            file=sys.stderr,
+        )
     print(
         f"Geladene Start-Konfiguration: "
         f"Modell='{current_settings['diarization_model_id']}', "

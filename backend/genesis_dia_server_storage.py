@@ -12,6 +12,7 @@ from .genesis_dia_server_globals import (
     LOG_FILE,
     LOGS_DIR,
     SETTINGS_FILE,
+    SETTINGS_SEED_FILE,
 )
 
 
@@ -113,6 +114,19 @@ def load_settings() -> Dict[str, Any]:
     except (json.JSONDecodeError, OSError) as exc:
         print(f"[FEHLER] Konnte Einstellungsdatei nicht laden: {exc}", file=sys.stderr)
         return DEFAULT_SETTINGS.copy()
+
+
+def load_settings_seed() -> Dict[str, Any]:
+    """Raw values from the seed file (docker/entrypoint.sh), or {} without one; used only on the first start."""
+
+    if not SETTINGS_SEED_FILE.exists():
+        return {}
+    try:
+        seed = json.loads(SETTINGS_SEED_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[FEHLER] Konnte Seed-Datei nicht laden: {exc}", file=sys.stderr)
+        return {}
+    return seed if isinstance(seed, dict) else {}
 
 
 def save_settings(settings: Dict[str, Any]) -> Dict[str, Any]:

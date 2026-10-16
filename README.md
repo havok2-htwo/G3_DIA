@@ -118,6 +118,10 @@ The dashboard offers:
 ## Settings and Tokens
 
 Persisted settings are stored in `logs/genesis_dia_settings.json`.
+On a fresh install (no settings file yet) the server starts with the defaults plus the
+built-in `24GB VRAM` tier and saves that file; existing settings are never changed. The
+Docker entrypoint only seeds `logs/genesis_dia_settings_seed.json` (cache path
+`/app/models`), which the server merges in on that first start.
 The most important runtime values are:
 
 - `diarization_model_id`
@@ -144,6 +148,7 @@ Runtime files are stored under [`logs`](x:/dev/G3_DIA/logs):
 - `logs/genesis_dia_settings.json`
 - `logs/genesis_dia_secrets.json`
 - `logs/genesis_dia_presets.json` (saved settings presets)
+- `logs/genesis_dia_settings_seed.json` (Docker only, first-start seed)
 - `logs/diarization_log.jsonl`
 
 ## Startup
