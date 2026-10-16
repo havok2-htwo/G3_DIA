@@ -24,7 +24,7 @@ from .genesis_dia_server_globals import (
     task_status_lock,
 )
 from .genesis_dia_server_gpu_lease import acquire_gpu_lease
-from .genesis_dia_server_storage import normalize_settings
+from .genesis_dia_server_storage import DEFAULT_SETTINGS, normalize_settings
 
 HUGGING_FACE_TOKEN = None
 
@@ -348,7 +348,7 @@ def skip_inactive_embeddings_enabled() -> bool:
 
 def release_between_phases_enabled() -> bool:
     with settings_lock:
-        return bool(current_settings.get("release_between_phases", True))
+        return bool(current_settings.get("release_between_phases", DEFAULT_SETTINGS["release_between_phases"]))
 
 
 def configured_embedding_batch_size() -> int:

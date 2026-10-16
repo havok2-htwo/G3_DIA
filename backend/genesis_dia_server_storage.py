@@ -24,11 +24,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "preload_model_on_startup": True,
     # Run the embedding network only for speakers active in a chunk (identical output, ~1.5x faster).
     "skip_inactive_embeddings": True,
-    # pyannote's config ships 32; 16 halves the embedding activations (~1 GB less peak VRAM on
-    # the shared GPU) while the ResNet34 is already ~90 % busy at 32, so throughput barely moves.
+    # pyannote's config ships 32. Measured on the RTX 5090 (5 min audio, process peak / speed): 8 = 2.29 GB / 198x,
+    # 16 = 2.56 GB / 241x, 32 = 4.51 GB / 239x, 64 = 8.37 GB / 234x realtime. 16 is the knee: 8 -> 16 costs +268 MiB,
+    # 16 -> 32 costs +1950 MiB for no speed. The peak does not depend on the audio length (60 min checked).
     "embedding_batch_size": 16,
-    # Return the segmentation phase's cached blocks before the embedding phase allocates its own.
-    "release_between_phases": True,
+    # empty_cache between segmentation and embeddings. Off: on the RTX 5090 it raised the request peak (batch 16,
+    # 5 and 60 min: 2560 MiB process / 1994 MiB reserved on, 2052 / 1486 MiB off, same speed). 4090 re-check open.
+    "release_between_phases": False,
 }
 
 EMBEDDING_BATCH_SIZE_RANGE = (1, 128)

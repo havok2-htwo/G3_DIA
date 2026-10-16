@@ -59,10 +59,31 @@ class BuiltinTierTests(PresetTestCase):
                 normalized = normalize_settings(values)
                 self.assertEqual({key: normalized[key] for key in values}, values, "a built-in value would be clamped")
 
-    def test_builtin_values_are_the_defaults_until_measured(self) -> None:
+    def test_builtin_values_are_the_measured_ones(self) -> None:
+        # RTX 5090: batch 16 is the knee, the phase release raises the peak, so every tier runs the same values.
+        expected = {
+            "embedding_batch_size": 16,
+            "skip_inactive_embeddings": True,
+            "release_between_phases": False,
+            "preload_model_on_startup": True,
+        }
         for name in TIER_NAMES:
-            for key, value in presets.BUILTIN_PRESETS[name]["values"].items():
-                self.assertEqual(value, DEFAULT_SETTINGS[key], f"{name}.{key}")
+            with self.subTest(name=name):
+                self.assertEqual(presets.BUILTIN_PRESETS[name]["values"], expected)
+
+    def test_builtin_values_are_independent_copies(self) -> None:
+        tiers = [presets.BUILTIN_PRESETS[name]["values"] for name in TIER_NAMES]
+        self.assertEqual(len({id(values) for values in tiers}), len(tiers))
+
+    def test_descriptions_carry_the_measured_vram(self) -> None:
+        for name in TIER_NAMES:
+            with self.subTest(name=name):
+                description = presets.BUILTIN_PRESETS[name]["description"]
+                for text in ("measured on the RTX 5090", "0.64 GB idle", "2.05 GB request peak", "2.5 GB startup"):
+                    self.assertIn(text, description)
+                self.assertNotIn("not measured yet", description)
+        self.assertIn("estimate", presets.BUILTIN_PRESETS["8+24 VRAM"]["description"])
+        self.assertIn("25-40x realtime", presets.BUILTIN_PRESETS["8+24 VRAM"]["description"])
 
     def test_preset_keys_hold_no_secrets_or_paths(self) -> None:
         for key in ("huggingface_token", "model_cache_path", "diarization_model_id"):

@@ -210,7 +210,7 @@ Expected JSON body:
   "preload_model_on_startup": true,
   "skip_inactive_embeddings": true,
   "embedding_batch_size": 16,
-  "release_between_phases": true
+  "release_between_phases": false
 }
 ```
 
@@ -237,14 +237,19 @@ Applies to the next request.
 
 `embedding_batch_size` (default `16`, range 1-128) overrides the speaker-embedding batch
 size from the pyannote snapshot config (32). The peak VRAM of a request depends on this
-batch, not on the audio length; 32 measured +1.96 GB over idle on the RTX 4090, 16 is
-expected to need about 1 GB less while the ResNet34 is already ~90 % busy at 32. Applies
-to the next request.
+batch, not on the audio length (5 and 60 min peak the same). Measured on the RTX 5090
+(5 min audio, release on): batch 8 = 2.29 GB process peak at 198x realtime, 16 = 2.56 GB
+at 241x, 32 = 4.51 GB at 239x, 64 = 8.37 GB at 234x. 16 is the knee: 8 -> 16 costs
++268 MiB for +22 % speed, 16 -> 32 costs +1950 MiB for nothing, 64 is slower and costs
++5.8 GB. Batch 8 is the fallback when every ~270 MiB counts. Applies to the next request.
 
-`release_between_phases` (default `true`) returns the segmentation phase's cached CUDA
-blocks (`empty_cache`) right before the embedding phase starts, so the request no longer
-holds both phases' blocks at once. Costs one `empty_cache` per request. Applies to the
-next request. The idle footprint is unaffected either way: DIA always releases the
+`release_between_phases` (default `false`) returns the segmentation phase's cached CUDA
+blocks (`empty_cache`) right before the embedding phase starts. It was meant to lower the
+peak, but on the RTX 5090 it raises it: batch 16, 5 and 60 min audio, 2560 MiB process /
+1994 MiB reserved with it, 2052 / 1486 MiB without, at the same speed (the embedding phase
+reuses the cached blocks; after the release it allocates fresh ones). Kept as a setting
+until the RTX 4090 is re-checked. A saved settings file that still says `true` keeps it on.
+Applies to the next request. The idle footprint is unaffected either way: DIA always releases the
 activation cache after each request.
 
 Both fields are optional; when omitted the saved value is kept.
@@ -267,7 +272,7 @@ presets by name. Loading a preset in the dashboard only fills the settings form;
       "note": null,
       "values": {
         "embedding_batch_size": 16,
-        "release_between_phases": true,
+        "release_between_phases": false,
         "skip_inactive_embeddings": true,
         "preload_model_on_startup": true,
         "gpu_device": "cuda:1"
@@ -287,8 +292,14 @@ card DIA runs on):
 
 Single-card tiers never set `gpu_device`. `8+24 VRAM` sets it to the CUDA device whose
 total memory is within 2 GiB of 8 GB, wherever that card sits; if no card matches,
-`gpu_device` is left out and `note` explains why. The tier values are currently the
-service defaults; measured values replace them later.
+`gpu_device` is left out and `note` explains why.
+
+All three tiers carry the same measured values: `embedding_batch_size` 16,
+`skip_inactive_embeddings` true, `release_between_phases` false,
+`preload_model_on_startup` true. Expected process VRAM, measured on the RTX 5090: ~0.64 GB
+idle, ~2.05 GB request peak (independent of audio length, 60 min checked), ~2.5 GB for the
+startup warm-up. On the 5090 that runs at ~240x realtime; the 2070S speed of `8+24 VRAM` is
+an estimate (~25-40x realtime), not a measurement. The 4090 and the 2070S were not measured.
 
 A preset holds only `gpu_device`, `embedding_batch_size`, `release_between_phases`,
 `skip_inactive_embeddings` and `preload_model_on_startup`. The model id, the cache path

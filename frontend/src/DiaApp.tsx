@@ -55,7 +55,7 @@ const emptySettings: AdminSettings = {
   preload_model_on_startup: true,
   skip_inactive_embeddings: true,
   embedding_batch_size: 16,
-  release_between_phases: true,
+  release_between_phases: false,
 };
 
 const MODEL_STATE_LABELS: Record<ModelStatus["state"], string> = {
@@ -800,7 +800,7 @@ export default function DiaApp() {
                 <option value="off">Off (keep segmentation cache)</option>
               </select>
             </label>
-            <p className="field-note full-width">Save the token here if the server should be able to load the gated pyannote model again after restart. Changing the token, cache path or device reloads the model immediately. Preload applies from the next server start; the embedding shortcut, embedding batch size (pyannote default 32; 16 needs ~1 GB less peak VRAM) and phase release apply to the next request.</p>
+            <p className="field-note full-width">Save the token here if the server should be able to load the gated pyannote model again after restart. Changing the token, cache path or device reloads the model immediately. Preload applies from the next server start; the embedding shortcut, embedding batch size (pyannote default 32; on the RTX 5090 16 peaks ~1.95 GB lower than 32 at the same speed) and phase release (off: on the RTX 5090 it raised the peak by ~0.5 GB) apply to the next request.</p>
             <div className="form-actions full-width">
               <button type="submit" disabled={saveBusy || !formLoaded}>{saveBusy ? "Saving..." : formLoaded ? "Save Settings" : "Loading settings..."}</button>
             </div>

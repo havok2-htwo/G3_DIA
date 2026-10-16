@@ -157,10 +157,12 @@ class PreloadSettingsTests(unittest.TestCase):
 
     def test_embedding_batch_and_phase_release_settings(self) -> None:
         self.assertEqual(DEFAULT_SETTINGS["embedding_batch_size"], 16)
-        self.assertTrue(DEFAULT_SETTINGS["release_between_phases"])
+        # Off by default: the release raised the request peak on the RTX 5090 (2560 vs 2052 MiB process).
+        self.assertFalse(DEFAULT_SETTINGS["release_between_phases"])
         old = normalize_settings({"diarization_model_id": "x"})
         self.assertEqual(old["embedding_batch_size"], 16)
-        self.assertTrue(old["release_between_phases"])
+        self.assertFalse(old["release_between_phases"])
+        self.assertTrue(normalize_settings({"release_between_phases": "on"})["release_between_phases"])
         self.assertEqual(normalize_settings({"embedding_batch_size": "32"})["embedding_batch_size"], 32)
         self.assertEqual(normalize_settings({"embedding_batch_size": 0})["embedding_batch_size"], 1)
         self.assertEqual(normalize_settings({"embedding_batch_size": 999})["embedding_batch_size"], 128)
@@ -186,6 +188,17 @@ class PhaseReleaseTests(unittest.TestCase):
         self.assertEqual(self._run(True, enabled=False), 1)  # also before pyannote's own path
         self.assertEqual(self._run(False), 0)
         self.assertEqual(self._run(None), 0)
+
+    def test_engine_callback_falls_back_to_the_default(self) -> None:
+        backup = dict(current_settings)
+        try:
+            current_settings.pop("release_between_phases", None)
+            self.assertFalse(engine.release_between_phases_enabled())
+            current_settings["release_between_phases"] = True
+            self.assertTrue(engine.release_between_phases_enabled())
+        finally:
+            current_settings.clear()
+            current_settings.update(backup)
 
     def test_reinstall_updates_release_callback(self) -> None:
         pipeline = make_pipeline(FakeEmbedding())

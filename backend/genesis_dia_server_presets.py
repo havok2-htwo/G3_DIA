@@ -26,7 +26,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .genesis_dia_server_globals import LOGS_DIR
-from .genesis_dia_server_storage import DEFAULT_SETTINGS, atomic_write_text, normalize_settings
+from .genesis_dia_server_storage import atomic_write_text, normalize_settings
 
 PRESETS_FILE = LOGS_DIR / "genesis_dia_presets.json"
 PRESET_NAME_MAX_LENGTH = 64
@@ -45,34 +45,44 @@ PRESET_KEYS = (
 CARD_MATCH_TOLERANCE_MIB = 2048
 
 
-def _defaults(*keys: str) -> Dict[str, Any]:
-    return {key: DEFAULT_SETTINGS[key] for key in keys}
+# Every tier runs the same values: DIA's peak is small and flat in audio length, so the cards differ only in speed.
+_MEASURED_VALUES: Dict[str, Any] = {
+    "embedding_batch_size": 16,
+    "skip_inactive_embeddings": True,
+    "release_between_phases": False,
+    "preload_model_on_startup": True,
+}
 
-
-_TIER_KEYS = ("embedding_batch_size", "release_between_phases", "skip_inactive_embeddings", "preload_model_on_startup")
+# Expected process VRAM with these values, measured in-process on the RTX 5090 (fp32, pyannote community-1).
+_VRAM_NOTE = (
+    "Expected process VRAM (measured on the RTX 5090): ~0.64 GB idle, ~2.05 GB request peak (independent of audio "
+    "length, 60 min checked), ~2.5 GB startup warm-up."
+)
 
 # ======================================================================================================================
 # BUILT-IN TIER VALUES
-# Placeholder: every tier currently carries the service defaults. The real per-tier values come from VRAM/throughput
-# measurements on the target cards in a later step and replace these. Do not tune them by guessing.
+# Measured on the RTX 5090 (5 and 60 min audio, batch 8/16/32/64, release on/off, skip on/off): batch 16 is the knee
+# (241x realtime; 32 adds +1.95 GB for no speed), release_between_phases=False peaks ~0.5 GB lower at the same speed,
+# skip_inactive_embeddings is 1.65x faster for the same peak. The 4090 and the 2070S were not measured.
 # ======================================================================================================================
 BUILTIN_PRESETS: Dict[str, Dict[str, Any]] = {
     "32GB VRAM": {
-        "description": "RTX 5090, all G3 services on one card (whole-card peak <= 30 GB). Values not measured yet: "
-        "service defaults.",
+        "description": "RTX 5090, all G3 services on one card (whole-card peak <= 30 GB). Batch 16, ~240x realtime. "
+        + _VRAM_NOTE,
         "target_vram_gb": None,
-        "values": _defaults(*_TIER_KEYS),
+        "values": dict(_MEASURED_VALUES),
     },
     "24GB VRAM": {
-        "description": "RTX 4090, all G3 services on one card (whole-card peak <= 23 GB). Values not measured yet: "
-        "service defaults.",
+        "description": "RTX 4090, all G3 services on one card (whole-card peak <= 23 GB). Same values as 32GB VRAM; "
+        "batch 8 would save ~270 MiB for ~18 % less speed. " + _VRAM_NOTE,
         "target_vram_gb": None,
-        "values": _defaults(*_TIER_KEYS),
+        "values": dict(_MEASURED_VALUES),
     },
     "8+24 VRAM": {
-        "description": "3090 + 2070S box, DIA alone on the 2070S (8 GB). Values not measured yet: service defaults.",
+        "description": "3090 + 2070S box, DIA alone on the 2070S (8 GB). " + _VRAM_NOTE + " Speed on the 2070S is an "
+        "estimate, not measured: ~25-40x realtime (60 min audio in ~2-3 min).",
         "target_vram_gb": 8,
-        "values": _defaults(*_TIER_KEYS),
+        "values": dict(_MEASURED_VALUES),
     },
 }
 

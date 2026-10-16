@@ -93,13 +93,15 @@ def _get_inactive_embedding(pipeline: Any, num_samples: int, num_frames: int) ->
 
 
 def release_segmentation_cache(state: dict) -> None:
-    """Hand the segmentation phase's cached CUDA blocks back before the embedding phase.
+    """Hand the segmentation phase's cached CUDA blocks back before the embedding phase (off by default).
 
-    pyannote calls ``get_embeddings`` right after the segmentation finished. Its
-    activations are freed by then but stay reserved in the caching allocator, so
-    the embedding phase grew the pool on top of them (+0.7 GB segmentation, +1.25 GB
-    embedding). Releasing here lets the request peak at the larger phase alone;
-    the cost is one ``empty_cache`` (a few ms).
+    pyannote calls ``get_embeddings`` right after the segmentation finished. The idea was
+    that the embedding phase would otherwise grow the pool on top of the segmentation's
+    cached blocks. Measured on the RTX 5090 (batch 16, 5 and 60 min audio) it is the
+    other way round: with the release the request peaks at 2560 MiB process / 1994 MiB
+    reserved, without it at 2052 / 1486 MiB, at the same speed. The embedding phase
+    reuses the cached segments; after ``empty_cache`` it allocates fresh ones and ends
+    up ~0.5 GB higher. Kept as a setting until the RTX 4090 is re-checked.
     """
 
     release = state.get("release_between_phases")
