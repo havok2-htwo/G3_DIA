@@ -24,9 +24,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "preload_model_on_startup": True,
     # Run the embedding network only for speakers active in a chunk (identical output, ~1.5x faster).
     "skip_inactive_embeddings": True,
-    # pyannote's config ships 32. Measured on the RTX 5090 (5 min audio, process peak / speed): 8 = 2.29 GB / 198x,
-    # 16 = 2.56 GB / 241x, 32 = 4.51 GB / 239x, 64 = 8.37 GB / 234x realtime. 16 is the knee: 8 -> 16 costs +268 MiB,
-    # 16 -> 32 costs +1950 MiB for no speed. The peak does not depend on the audio length (60 min checked).
+    # pyannote's config ships 32. Measured on the RTX 5090 (5 min audio, release on, process peak / speed):
+    # 8 = 2.29 GB / 198x, 16 = 2.56 GB / 241x, 32 = 4.51 GB / 239x, 64 = 8.37 GB / 234x realtime (16 with release off:
+    # 2.05 GB). 16 is the knee: 8 -> 16 costs +268 MiB, 16 -> 32 costs +1950 MiB for no speed. The peak does not depend
+    # on the audio length (60 min checked).
     "embedding_batch_size": 16,
     # empty_cache between segmentation and embeddings. Off: on the RTX 5090 it raised the request peak (batch 16,
     # 5 and 60 min: 2560 MiB process / 1994 MiB reserved on, 2052 / 1486 MiB off, same speed). 4090 re-check open.
